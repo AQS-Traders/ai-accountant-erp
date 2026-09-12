@@ -335,6 +335,157 @@ async def _payment_fast_path_call(
     return [ToolCall(tool_name="record_supplier_payment", arguments=params)]
 
 
+# -----------------------------------------------------------------------
+# CA TREATMENT 3 — SETTLEMENT of an expense already recorded as payable.
+# Deterministic checklist (no LLM): find the unpaid payable, confirm it
+# with the user, allocate the payment to THAT bill (Dr trade payables /
+# Cr cash-bank).  Never a second expense.
+# -----------------------------------------------------------------------
+
+async def _unpaid_payables(
+    organization_id: uuid.UUID, keyword: str
+) -> List[Dict[str, Any]]:
+    """Every purchase bill with a remaining outstanding balance; keyword
+    matches (category vocabulary) rank first, then any unpaid bill."""
+    rows = await fetch_many(
+        "purchase_bills",
+        filters={"organization_id": str(organization_id)},
+        select="id,bill_number,supplier_id,bill_date,due_date,total,amount_paid,status,notes",
+        limit=50,
+    )
+    open_rows = [
+        r for r in (rows or [])
+        if str(r.get("status") or "").upper() not in ("PAID", "CANCELLED", "VOIDED")
+        and float(r.get("total") or 0) - float(r.get("amount_paid") or 0) > 0.005
+    ]
+    if keyword:
+        kw = str(keyword).lower()
+        matched = [
+            r for r in open_rows
+            if kw in " ".join(
+                str(r.get(k) or "")
+                for k in ("notes", "bill_number", "supplier_invoice_ref")
+            ).lower()
+        ]
+        return matched or open_rows
+    return open_rows
+
+
+def _payable_label(bill: Dict[str, Any]) -> str:
+    outstanding = float(bill.get("total") or 0) - float(bill.get("amount_paid") or 0)
+    return (
+        f"{bill.get('bill_number') or 'bill'} — "
+        f"{bill.get('notes') or 'unpaid payable'} "
+        f"outstanding {outstanding:,.0f} "
+        f"(due {bill.get('due_date') or bill.get('bill_date')})"
+    )
+
+
+async def _settlement_check_question(
+    organization_id: uuid.UUID, execution_plan
+) -> Optional[Dict[str, Any]]:
+    """The 'Settlement check' gate: before ANY settlement payment is
+    recorded, the located payable is CONFIRMED with the user (never
+    silently settled) — or the request falls back to a new expense when
+    the books hold no unpaid payable at all."""
+    entities = execution_plan.extracted_entities or {}
+    if execution_plan.intent != "record_expense":
+        return None
+    if str(entities.get("settlement_position") or "").upper() != "SETTLE_EXISTING_PAYABLE":
+        return None
+    if entities.get("settle_confirmed"):
+        return None
+    if entities.get("amount") is None or not entities.get("transaction_date"):
+        return None  # amount/date round lands first
+    purpose = str(entities.get("transaction_purpose") or "")
+    label = purpose_label(purpose) if purpose else ""
+    bills = await _unpaid_payables(organization_id, label)
+    if not bills:
+        return {
+            "question": (
+                "Settlement fallback: I could not find any unpaid payable in "
+                f"your books, so this {float(entities.get('amount')):,.0f} "
+                "cannot be a settlement. Record it as a new expense instead — how?"
+            ),
+            "options": [
+                "Paid now — cash (new expense)",
+                "Paid now — bank (new expense)",
+                "Record as a new payable — pay later",
+            ],
+            "required_fields": ["settlement_fallback"],
+        }
+    if len(bills) == 1:
+        return {
+            "question": (
+                "Settlement check: I found 1 unpaid payable — "
+                f"{_payable_label(bills[0])}. Settle this one instead of "
+                "recording a new expense?"
+            ),
+            "options": [
+                "Yes — settle it",
+                "No — record it as a new expense instead",
+            ],
+            "required_fields": ["settlement_check"],
+        }
+    opts = [_payable_label(b) for b in bills[:4]]
+    opts.append("None of these — record as a new expense instead")
+    return {
+        "question": (
+            f"Settlement check: I found {len(bills)} unpaid payables. "
+            "Which one does this payment settle?"
+        ),
+        "options": opts,
+        "required_fields": ["settlement_check"],
+    }
+
+
+async def _settlement_payment_call(
+    organization_id: uuid.UUID, entities: Dict[str, Any]
+) -> Optional[List[ToolCall]]:
+    """Build the SETTLEMENT payment: allocate to the confirmed payable
+    (Dr trade payables / Cr cash-bank) — never a new expense."""
+    if str(entities.get("settlement_position") or "").upper() != "SETTLE_EXISTING_PAYABLE":
+        return None
+    if not entities.get("settle_confirmed"):
+        return None
+    payment = str(entities.get("payment_method") or "").upper()
+    if payment not in ("CASH", "BANK_TRANSFER"):
+        return None
+    txn_date = entities.get("transaction_date")
+    if not txn_date:
+        return None
+    purpose = str(entities.get("transaction_purpose") or "")
+    bills = await _unpaid_payables(
+        organization_id, purpose_label(purpose) if purpose else ""
+    )
+    if not bills:
+        return None
+    pick = (entities.get("settle_pick") or "").strip().lower()
+    target = None
+    if pick:
+        for bill in bills:
+            if pick in _payable_label(bill).lower():
+                target = bill
+                break
+    elif len(bills) == 1:
+        target = bills[0]
+    if target is None or not target.get("supplier_id"):
+        return None
+    outstanding = float(target.get("total") or 0) - float(target.get("amount_paid") or 0)
+    return [ToolCall(
+        tool_name="record_expense_payment",
+        arguments={
+            "supplier_id": str(target["supplier_id"]),
+            "amount": outstanding,
+            "payment_date": str(txn_date),
+            "payment_method": payment,
+            "transaction_nature": "ALLOCATION",
+            "bill_id": str(target["id"]),
+            "reference": f"Settlement of {target.get('bill_number') or 'payable'}",
+        },
+    )]
+
+
 def _cash_sale_fast_path_call(
     entities: Dict[str, Any],
 ) -> Optional[List[ToolCall]]:
@@ -634,6 +785,11 @@ async def _deterministic_mutation_calls(
         return None
     entities = execution_plan.extracted_entities or {}
     if execution_plan.intent == "record_expense":
+        # CA treatment 3 first: a confirmed settle-existing-payable
+        # allocates the payment to THAT bill — never a new expense.
+        settle_call = await _settlement_payment_call(organization_id, entities)
+        if settle_call:
+            return settle_call
         # R3.5: the generic-expense fast path (purpose + settlement
         # confirmed, unambiguous).  None => the ladder continues instead.
         return _expense_fast_path_call(entities, classification)
@@ -1750,6 +1906,40 @@ async def execute(
                 requires_user_input=True,
             )
         _phase_elapsed("party_question.done", asked=bool(party_question))
+        # CA treatment 3 — SETTLEMENT CHECK: a settle-existing-payable
+        # request locates the unpaid payable and CONFIRMS it with the
+        # user before any payment is recorded (never silently settled,
+        # never a second expense).  No unpaid payable → the fallback
+        # re-picks the treatment.
+        _phase_elapsed("settlement_question.start")
+        settlement_question = await _settlement_check_question(
+            organization_id=organization_id,
+            execution_plan=execution_plan,
+        )
+        if settlement_question:
+            settle_required = settlement_question.get("required_fields") or [
+                "settlement_check"
+            ]
+            clarification = await create_clarification(
+                session_id=session_id,
+                question=settlement_question["question"],
+                required_fields=settle_required,
+            )
+            await _log_step(session_id, "AWAITING_CLARIFICATION", {
+                "source": "settlement_check",
+                "question": settlement_question["question"][:300],
+            })
+            return AgentResponse(
+                status=ExecutionStatus.AWAITING_CLARIFICATION,
+                execution_id=session_id,
+                question=clarification.get(
+                    "question", settlement_question["question"]
+                ),
+                options=settlement_question.get("options"),
+                required_information=settle_required,
+                requires_user_input=True,
+            )
+        _phase_elapsed("settlement_question.done", asked=bool(settlement_question))
         # Work Stream R4.10 — CATALOG CHECK: invoice lines naming items
         # that are not in the product/service catalog are resolved the
         # same way the party gate works — the user decides ONCE whether

@@ -716,7 +716,13 @@ def plan(
     _purchase_family = (
         "record_purchase", "record_cash_purchase", "record_credit_purchase",
     )
-    if intent == "record_expense" and payment is None:
+    if (
+        intent == "record_expense" and payment is None
+        and str(entities.get("settlement_position") or "").upper()
+        != "SETTLE_EXISTING_PAYABLE"
+    ):
+        # CA treatment 3 guard: a settle-existing-payable answer must NOT
+        # default to a paid expense — the settlement path handles it.
         payment = "CASH"
 
     if payment == "CREDIT" and intent in (
@@ -914,7 +920,13 @@ def _questions_for_fields(
             )
         elif f == "settlement_position":
             questions.append(SETTLEMENT_POSITION_QUESTION)
-        elif f == "payment_type" and intent in ("record_receipt", "record_payment"):
+        elif f == "payment_type" and intent in (
+            "record_receipt", "record_payment",
+        ) or (
+            f == "payment_type" and intent == "record_expense"
+            and str(ents.get("settlement_position") or "").upper()
+            == "SETTLE_EXISTING_PAYABLE"
+        ):
             # Work Stream R4.4 — the settlement CHANNEL decides which
             # ledger the money hits (cash vs bank), so it is asked.
             if intent == "record_receipt":
@@ -984,7 +996,15 @@ def _missing_fields(intent: str, entities: Dict[str, Any]) -> List[str]:
             if needs_cap and not entities.get("capitalization_decision"):
                 missing.append("capitalization_decision")
         if not entities.get("payment_method"):
-            missing.append("settlement_position")
+            if (
+                str(entities.get("settlement_position") or "").upper()
+                == "SETTLE_EXISTING_PAYABLE"
+            ):
+                # The treatment is known (settle a payable) — only the
+                # settlement CHANNEL (cash vs bank ledger) is open.
+                missing.append("payment_type")
+            else:
+                missing.append("settlement_position")
 
     # Work Stream R - the nature/purpose decision comes FIRST: it
     # re-routes the intent (fixed asset -> registration, consumable ->
@@ -1267,6 +1287,37 @@ def _merge_clarification_answers(
                     if resolved_settle == "CREDIT":
                         merged["settlement_position"] = "OUTSTANDING"
                 continue
+
+        # OWNER POLICY — SETTLEMENT CHECK ("Settle this unpaid payable?"):
+        # YES confirms the located payable (the deterministic settlement
+        # call allocates the payment to it — Dr trade payables / Cr
+        # cash-bank, never a second expense).  NO re-routes to a NEW
+        # expense; a picked label (multi-bill list) confirms that bill.
+        if "settlement check:" in question:
+            low = answer.lower().strip(" .)'\"")
+            if low.startswith(("no", "cancel", "record as new", "different")):
+                merged["settlement_position"] = "OUTSTANDING"
+                merged["payment_method"] = "CREDIT"
+            else:
+                merged["settle_confirmed"] = True
+                if not low.startswith(("yes", "y", "ok")):
+                    merged["settle_pick"] = answer.strip()
+            continue
+
+        # SETTLEMENT FALLBACK — no unpaid payable exists in the books, so
+        # the (d) answer cannot be a settlement; the user re-picks the
+        # treatment and the request re-reasons from there.
+        if "settlement fallback:" in question:
+            low = answer.lower().strip(" .)'\"")
+            merged["settlement_position"] = None
+            if low.startswith("paid now — cash"):
+                merged["payment_method"] = "CASH"
+            elif low.startswith("paid now — bank"):
+                merged["payment_method"] = "BANK_TRANSFER"
+            else:
+                merged["payment_method"] = "CREDIT"
+                merged["settlement_position"] = "OUTSTANDING"
+            continue
 
         # Work Stream R4.4 — settlement channel for receipts/payments:
         # cash hits the CASH ledger, bank hits the BANK ledger (R4.1) —
