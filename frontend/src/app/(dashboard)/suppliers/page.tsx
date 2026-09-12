@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { Plus, Search, Pencil } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { useOrg } from "@/lib/hooks/useOrg";
 import { formatCurrency } from "@/lib/utils/currency";
@@ -83,6 +83,93 @@ export default function SuppliersPage() {
     load();
   };
 
+  /* ---- Admin edit flow: review changes → confirm → apply ------------- */
+  const [editOpen, setEditOpen] = useState(false);
+  const [editing, setEditing] = useState<Supplier | null>(null);
+  const [editForm, setEditForm] = useState<SupplierForm>(EMPTY_FORM);
+  const [editConfirm, setEditConfirm] = useState(false);
+  const [editChanges, setEditChanges] = useState<
+    { field: string; label: string; from: string; to: string }[]
+  >([]);
+  const [editUpdates, setEditUpdates] = useState<Record<string, unknown>>({});
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const FIELD_LABELS: Record<string, string> = {
+    name: "Name", email: "Email", phone: "Phone", tax_number: "Tax number",
+    payment_terms_days: "Terms (days)", credit_limit: "Credit limit", notes: "Notes",
+  };
+  const fmtVal = (v: string) => (v === "" ? "(empty)" : v);
+
+  const openEdit = (s: Supplier) => {
+    setEditing(s);
+    setEditForm({
+      name: s.name ?? "", email: s.email ?? "", phone: s.phone ?? "",
+      tax_number: s.tax_number ?? "",
+      payment_terms_days: s.payment_terms_days != null ? String(s.payment_terms_days) : "",
+      credit_limit: s.credit_limit != null ? String(s.credit_limit) : "",
+      notes: s.notes ?? "",
+    });
+    setEditConfirm(false); setEditChanges([]); setEditError(null);
+    setEditOpen(true);
+  };
+
+  const handleEditSave = () => {
+    if (!editing) return;
+    if (editForm.name.trim().length < 2) { setEditError("Name must be at least 2 characters."); return; }
+    const next: Record<string, string> = {
+      name: editForm.name.trim(),
+      email: editForm.email.trim(),
+      phone: editForm.phone.trim(),
+      tax_number: editForm.tax_number.trim(),
+      payment_terms_days: editForm.payment_terms_days.trim(),
+      credit_limit: editForm.credit_limit.trim(),
+      notes: editForm.notes.trim(),
+    };
+    const prev: Record<string, string> = {
+      name: editing.name ?? "",
+      email: editing.email ?? "",
+      phone: editing.phone ?? "",
+      tax_number: editing.tax_number ?? "",
+      payment_terms_days: editing.payment_terms_days != null ? String(editing.payment_terms_days) : "",
+      credit_limit: editing.credit_limit != null ? String(editing.credit_limit) : "",
+      notes: editing.notes ?? "",
+    };
+    const changes: { field: string; label: string; from: string; to: string }[] = [];
+    const updates: Record<string, unknown> = {};
+    for (const k of Object.keys(next)) {
+      if (next[k] !== prev[k]) {
+        changes.push({ field: k, label: FIELD_LABELS[k] ?? k, from: prev[k], to: next[k] });
+        updates[k] = k === "payment_terms_days" || k === "credit_limit"
+          ? (next[k] === "" ? null : Number(next[k]))
+          : (next[k] === "" ? null : next[k]);
+      }
+    }
+    if (changes.length === 0) { setEditError("No changes to save."); return; }
+    setEditChanges(changes);
+    setEditUpdates(updates);
+    setEditError(null);
+    setEditConfirm(true);
+  };
+
+  const handleConfirmEdit = async () => {
+    if (!editing) return;
+    setEditSaving(true);
+    setEditError(null);
+    const supabase = createClient();
+    const { error: rpcError } = await supabase.rpc("update_party_info", {
+      p_kind: "supplier",
+      p_record_id: editing.id,
+      p_updates: editUpdates,
+    });
+    setEditSaving(false);
+    if (rpcError) { setEditError(rpcError.message); return; }
+    setEditOpen(false);
+    setEditing(null);
+    setEditConfirm(false);
+    load();
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <PageHeader
@@ -128,6 +215,7 @@ export default function SuppliersPage() {
                 <th className="px-4 py-3 font-medium">Phone</th>
                 <th className="px-4 py-3 font-medium text-right">Credit Limit</th>
                 <th className="px-4 py-3 font-medium">Status</th>
+                <th className="px-4 py-3 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -141,6 +229,16 @@ export default function SuppliersPage() {
                     {s.credit_limit != null ? formatCurrency(s.credit_limit, s.currency_code ?? undefined) : "-"}
                   </td>
                   <td className="px-4 py-3"><StatusBadge status={s.is_active ? "ACTIVE" : "VOIDED"} /></td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      onClick={() => openEdit(s)}
+                      title="Edit details (owner/admin)"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-border-default bg-bg-surface px-2.5 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary hover:border-ai-300 transition-colors"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      Edit
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -202,6 +300,96 @@ export default function SuppliersPage() {
             </button>
           </div>
         </div>
+      </Modal>
+
+      {/* Edit modal — two-step: edit fields → review & confirm */}
+      <Modal
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        title={editConfirm ? "Confirm changes" : `Edit supplier — ${editing?.name ?? ""}`}
+      >
+        {!editConfirm ? (
+          <div className="space-y-4">
+            <div>
+              <label className="text-xs font-medium text-text-secondary">Name *</label>
+              <input className={`${inputCls} mt-1.5`} value={editForm.name}
+                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs font-medium text-text-secondary">Email</label>
+                <input className={`${inputCls} mt-1.5`} type="email" value={editForm.email}
+                  onChange={(e) => setEditForm({ ...editForm, email: e.target.value })} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary">Phone</label>
+                <input className={`${inputCls} mt-1.5`} value={editForm.phone}
+                  onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })} />
+              </div>
+            </div>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="text-xs font-medium text-text-secondary">Tax number</label>
+                <input className={`${inputCls} mt-1.5`} value={editForm.tax_number}
+                  onChange={(e) => setEditForm({ ...editForm, tax_number: e.target.value })} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary">Terms (days)</label>
+                <input className={`${inputCls} mt-1.5`} type="number" min={0} value={editForm.payment_terms_days}
+                  onChange={(e) => setEditForm({ ...editForm, payment_terms_days: e.target.value })} />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-text-secondary">Credit limit</label>
+                <input className={`${inputCls} mt-1.5`} type="number" min={0} value={editForm.credit_limit}
+                  onChange={(e) => setEditForm({ ...editForm, credit_limit: e.target.value })} />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-text-secondary">Notes</label>
+              <textarea className={`${inputCls} mt-1.5 min-h-16 resize-y`} value={editForm.notes}
+                onChange={(e) => setEditForm({ ...editForm, notes: e.target.value })} />
+            </div>
+            {editError && <p className="text-xs text-error-600 bg-error-50 rounded-xl px-3 py-2">{editError}</p>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setEditOpen(false)}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary transition-colors">
+                Cancel
+              </button>
+              <button onClick={handleEditSave}
+                className="px-5 py-2 btn-3d btn-shine rounded-xl bg-ai-500 hover:bg-ai-600 text-white text-sm font-medium transition-colors">
+                Review Changes
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-sm text-text-secondary">
+              You are about to update <span className="font-medium text-text-primary">{editing?.name}</span>.
+              These changes apply immediately and are recorded in the audit log.
+            </p>
+            <div className="rounded-xl border border-border-subtle divide-y divide-border-subtle">
+              {editChanges.map((c) => (
+                <div key={c.field} className="px-3 py-2 text-sm">
+                  <span className="font-medium text-text-primary">{c.label}:</span>{" "}
+                  <span className="text-text-muted line-through">{fmtVal(c.from)}</span>{" "}
+                  <span className="text-text-muted">→</span>{" "}
+                  <span className="text-emerald-600 font-medium">{fmtVal(c.to)}</span>
+                </div>
+              ))}
+            </div>
+            {editError && <p className="text-xs text-error-600 bg-error-50 rounded-xl px-3 py-2">{editError}</p>}
+            <div className="flex justify-end gap-2 pt-1">
+              <button onClick={() => setEditConfirm(false)}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-text-secondary hover:text-text-primary transition-colors">
+                Back
+              </button>
+              <button onClick={handleConfirmEdit} disabled={editSaving}
+                className="px-5 py-2 btn-3d btn-shine rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-medium disabled:opacity-40 transition-colors">
+                {editSaving ? "Saving…" : "Confirm & Save"}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
