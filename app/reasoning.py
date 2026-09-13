@@ -1223,6 +1223,23 @@ def analyze_requirements(
                 key="counterparty", dimension="Counterparty",
                 state=FieldResolutionState.NOT_QUERIED,
             ))
+    elif intent == "record_expense":
+        # CA-GRADE: party is ONLY material when the treatment creates a
+        # payable (accrued expense) or settles one. Cash/bank/prepaid
+        # treatments carry no party dimension — asking is domain noise.
+        settlement = str(entities.get("settlement_position") or "").upper()
+        if settlement in ("OUTSTANDING", "SETTLE_EXISTING_PAYABLE"):
+            nodes.append(DependencyNode(
+                key="counterparty", dimension="Counterparty",
+                state=FieldResolutionState.MISSING_AND_REQUIRED,
+                question="Who is the supplier / payee?",
+            ))
+        else:
+            nodes.append(DependencyNode(
+                key="counterparty", dimension="Counterparty",
+                state=FieldResolutionState.MISSING_BUT_OPTIONAL,
+                detail="not required — this treatment records a direct payment, not a payable",
+            ))
     # Intents without any party dimension get no node at all — the
     # dependency graph is transaction-specific, never universal.
 

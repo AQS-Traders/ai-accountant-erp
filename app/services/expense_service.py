@@ -19,7 +19,7 @@ async def create_expense(
     *,
     organization_id: uuid.UUID,
     expense_date: Optional[str] = None,
-    payee_name: str,
+    payee_name: Optional[str] = None,
     description: str,
     subtotal: float,
     currency_code: str = "PKR",
@@ -34,7 +34,7 @@ async def create_expense(
     expense = await repo.create_expense(
         organization_id=organization_id,
         expense_date=exp_date,
-        payee_name=payee_name,
+        payee_name=payee_name or "",
         description=description,
         subtotal=subtotal,
         currency_code=currency_code,
