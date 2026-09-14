@@ -785,3 +785,22 @@ register("register_fixed_asset", handler=_register_fixed_asset, read_only=False,
 register("dispose_fixed_asset", handler=_dispose_fixed_asset, read_only=False, description="Dispose of / sell / write off a fixed asset: removes cost and accumulated depreciation, records proceeds and any gain or loss via a posted journal")
 register("record_asset_depreciation", handler=_record_asset_depreciation, read_only=False, description="Record asset depreciation: posts the depreciation journal and updates accumulated depreciation and book value")
 
+
+
+# ===================================================================
+# FINANCIAL HEALTH SCORING
+# ===================================================================
+
+async def _calculate_health(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.health_service import calculate_health
+    data = await calculate_health(organization_id)
+    return ToolResult(tool_name="calculate_health", success=True, data=data)
+
+async def _get_health(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.health_service import get_latest_snapshot, get_history
+    latest = await get_latest_snapshot(organization_id)
+    history = await get_history(organization_id)
+    return ToolResult(tool_name="get_health", success=True, data={"latest": latest, "history": history})
+
+register("calculate_health", handler=_calculate_health, read_only=False, description="Calculate financial health score")
+register("get_health", handler=_get_health, read_only=True, description="Get financial health history")
