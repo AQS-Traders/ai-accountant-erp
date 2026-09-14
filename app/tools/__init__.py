@@ -804,3 +804,57 @@ async def _get_health(organization_id: uuid.UUID, **kw) -> ToolResult:
 
 register("calculate_health", handler=_calculate_health, read_only=False, description="Calculate financial health score")
 register("get_health", handler=_get_health, read_only=True, description="Get financial health history")
+
+
+# ===================================================================
+# RECURRING TRANSACTIONS
+# ===================================================================
+
+async def _create_recurring_template(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import create_template
+    data = await create_template(organization_id=organization_id, **kw)
+    return ToolResult(tool_name="create_recurring_template", success=True, data=data)
+
+async def _get_recurring_templates(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import list_templates
+    data = await list_templates(
+        organization_id, status=kw.get("status"), limit=kw.get("limit", 100)
+    )
+    return ToolResult(tool_name="get_recurring_templates", success=True, data=data)
+
+async def _get_recurring_template(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import get_template
+    data = await get_template(
+        organization_id, template_id=uuid.UUID(str(kw["template_id"]))
+    )
+    return ToolResult(tool_name="get_recurring_template", success=True, data=data)
+
+async def _update_recurring_template(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import set_status
+    data = await set_status(
+        organization_id=organization_id,
+        template_id=uuid.UUID(str(kw["template_id"])),
+        status=str(kw["status"]),
+    )
+    return ToolResult(tool_name="update_recurring_template", success=True, data=data)
+
+async def _generate_recurring(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import generate_due
+    data = await generate_due(organization_id, as_of=kw.get("as_of"))
+    return ToolResult(tool_name="generate_recurring", success=True, data=data)
+
+async def _get_recurring_executions(organization_id: uuid.UUID, **kw) -> ToolResult:
+    from app.services.recurring_service import list_executions
+    data = await list_executions(
+        organization_id,
+        template_id=uuid.UUID(str(kw["template_id"])) if kw.get("template_id") else None,
+        limit=kw.get("limit", 100),
+    )
+    return ToolResult(tool_name="get_recurring_executions", success=True, data=data)
+
+register("create_recurring_template", handler=_create_recurring_template, read_only=False, description="Create a recurring transaction template (balanced journal lines + frequency + next due date)")
+register("get_recurring_templates", handler=_get_recurring_templates, read_only=True, description="List recurring transaction templates (optionally filter by status)")
+register("get_recurring_template", handler=_get_recurring_template, read_only=True, description="Get a single recurring transaction template")
+register("update_recurring_template", handler=_update_recurring_template, read_only=False, description="Pause / resume / complete / cancel a recurring template")
+register("generate_recurring", handler=_generate_recurring, read_only=False, description="Generate journal entries for every due recurring template (draft unless auto_post); advances next due dates")
+register("get_recurring_executions", handler=_get_recurring_executions, read_only=True, description="List recurring executions (generated/failed journal runs)")
