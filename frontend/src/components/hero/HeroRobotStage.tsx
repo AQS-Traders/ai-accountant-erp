@@ -113,7 +113,6 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
   const t = useRef(0);
   const dur = useRef(reduced ? Infinity : 5.0); // boot runs ~5s, then loop
   const dir = useRef<1 | -1>(1);
-  const dir = useRef<1 | -1>(1);
   useEffect(() => {
     dir.current = Math.random() > 0.5 ? 1 : -1;
   }, []);
