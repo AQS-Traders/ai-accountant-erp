@@ -171,7 +171,7 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
        stand-up (pitch 90->0, knees bend), 3.0-4.0s activation stretch
        (arms to the sky, up on toes), 4.0-5.0s hello wave. Then the
        normal activity loop takes over. */
-    if (p === "boot") {
+    if (phase.current === "boot") {
       if (reduced || t.current >= 5.0) {
         phase.current = "idle";
         t.current = 0;
