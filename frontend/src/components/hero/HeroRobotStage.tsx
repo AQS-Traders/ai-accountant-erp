@@ -9,10 +9,12 @@
 /* white glossy shell, deep-teal accents, dark glass visor, glowing    */
 /* cyan face, "Ai" chest badge, tablet in hand (see robot/RobotModel). */
 /*                                                                      */
-/* Behaviour: a random activity loop — wave · idle · walk · hop ·      */
-/* dance · clap · read · sit — roaming the stage's empty areas. The    */
-/* facial expression follows the activity (excited / sleepy / focus).  */
-/* Falls back to a calm idle under prefers-reduced-motion.             */
+/* Behaviour: boot — he is part of the hero floor from frame one (lying
+   flat, no fall-in), rises zombie-style, stretches awake, waves hello —
+   then a random activity loop: wave · idle · walk · hop · dance · clap ·
+   read · sit — roaming the stage's empty areas. The facial expression
+   follows the activity (excited / sleepy / focus).
+   Falls back to a calm idle under prefers-reduced-motion. */
 /* ================================================================== */
 
 import { Component, Suspense, useEffect, useRef, useState } from "react";
@@ -24,7 +26,7 @@ import { RobotModel, type FaceMode } from "@/components/robot/RobotModel";
 
 type Variant = "hero" | "compact";
 type Phase =
-  | "wave" | "idle" | "walk" | "hop" | "dance" | "clap" | "read" | "sit"
+  | "boot" | "wave" | "idle" | "walk" | "hop" | "dance" | "clap" | "read" | "sit"
   | "interact" | "spin" | "stretch" | "think" | "march" | "peek" | "jumpingjack"
   | "robotdance" | "moonwalk" | "conductor" | "kungfu" | "bow" | "cartwheel" | "meditate";
 type PokeTarget = "invoice" | "journal" | "trial" | "overview" | "ask";
@@ -102,13 +104,15 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
   const face = useRef<FaceMode>("happy");
 
   /* --- behaviour state (refs on purpose: 60fps, no re-renders) --- */
-  /* Starts on a calm idle — NO greet/wave entrance performance. Ledger
-     is a native part of the hero: present and still from the first
-     frame, on every load/reload; the ambient activity loop simply
-     resumes from there. */
-  const phase = useRef<Phase>("idle");
+  /* Boot sequence on load: Ledger starts lying flat (zombie-rest), stands
+     up in place, then activates with a stretch + wave before the ambient
+     activity loop takes over. NO falling-from-above entrance — he is a
+     native part of the hero; the stage simply opens on him already lying
+     there, and he rises. */
+  const phase = useRef<Phase>("boot");
   const t = useRef(0);
-  const dur = useRef(reduced ? Infinity : 2.4);
+  const dur = useRef(reduced ? Infinity : 5.0); // boot runs ~5s, then loop
+  const dir = useRef<1 | -1>(1);
   const dir = useRef<1 | -1>(1);
   useEffect(() => {
     dir.current = Math.random() > 0.5 ? 1 : -1;
@@ -163,8 +167,21 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
     t.current += d;
     const time = state.clock.elapsedTime;
 
+    /* ---- BOOT SEQUENCE (once per load) ----
+       0.0-1.2s lying flat (visitors see him "asleep"), 1.2-3.0s zombie
+       stand-up (pitch 90->0, knees bend), 3.0-4.0s activation stretch
+       (arms to the sky, up on toes), 4.0-5.0s hello wave. Then the
+       normal activity loop takes over. */
+    if (p === "boot") {
+      if (reduced || t.current >= 5.0) {
+        phase.current = "idle";
+        t.current = 0;
+        dur.current = rand(2.4, 3.2);
+      }
+    }
+
     /* random activity loop — bigger repertoire, weighted toward motion */
-    if (t.current >= dur.current && !reduced) {
+    if (phase.current !== "boot" && t.current >= dur.current && !reduced) {
       t.current = 0;
       const canPoke = wide && variant === "hero";
       const pool: Phase[] = canPoke
@@ -200,7 +217,78 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
     }
     if (reduced) phase.current = "idle";
     const p = phase.current;
-    face.current = reduced ? "happy" : faceForPhase(p);
+    /* Boot face: eyes closed while down, wide awake once he's up */
+    face.current =
+      p === "boot"
+        ? t.current < 2.2 ? "sleepy" : "excited"
+        : faceForPhase(p);
+
+    /* ---- BOOT motion: zombie stand-up, activation stretch, hello wave.
+       Runs in place on the hero floor — no travel, no falling-in. ---- */
+    if (p === "boot") {
+      const stand = THREE.MathUtils.clamp((t.current - 1.2) / 1.8, 0, 1);
+      const rise = stand * stand * (3 - 2 * stand); // smoothstep ease
+      const stretchT = THREE.MathUtils.clamp((t.current - 3.0) / 1.0, 0, 1);
+      const waveT = THREE.MathUtils.clamp((t.current - 4.0) / 1.0, 0, 1);
+
+      /* flat on his back -> upright, exactly where he lies */
+      g.rotation.x = (1 - rise) * (Math.PI / 2);
+      g.rotation.y = 0;
+      g.rotation.z = 0;
+      g.position.x = THREE.MathUtils.damp(g.position.x, 0, 2, d);
+      g.position.z = THREE.MathUtils.damp(g.position.z, 0.1, 2, d);
+      const kneeBend = Math.sin(rise * Math.PI) * 0.22;
+      g.position.y = THREE.MathUtils.damp(
+        g.position.y,
+        (1 - rise) * 0.02 + kneeBend * 0.1 + Math.sin(time * 2) * 0.02,
+        8,
+        d,
+      );
+
+      /* knees bend mid-rise, straighten once standing */
+      if (legL.current) {
+        legL.current.rotation.x = THREE.MathUtils.damp(legL.current.rotation.x, kneeBend * 1.6, 6, d);
+        legL.current.rotation.z = THREE.MathUtils.damp(legL.current.rotation.z, 0, 6, d);
+      }
+      if (legR.current) {
+        legR.current.rotation.x = THREE.MathUtils.damp(legR.current.rotation.x, kneeBend * 1.6, 6, d);
+        legR.current.rotation.z = THREE.MathUtils.damp(legR.current.rotation.z, 0, 6, d);
+      }
+
+      /* arms: resting while down -> sky stretch -> hello wave */
+      const stretchAmt = stretchT * (1 - waveT);
+      const azLb = -0.1 + (-2.45 + Math.sin(t.current * 5) * 0.08) * stretchAmt;
+      const azRb = 0.1
+        + (2.45 - Math.sin(t.current * 5) * 0.08) * stretchAmt
+        + waveT * (2.25 + Math.sin(t.current * 9) * 0.3);
+      const axb = -0.3 * stretchAmt;
+      if (armL.current) {
+        armL.current.rotation.x = THREE.MathUtils.damp(armL.current.rotation.x, axb, 6, d);
+        armL.current.rotation.z = THREE.MathUtils.damp(armL.current.rotation.z, azLb, 6, d);
+      }
+      if (armR.current) {
+        armR.current.rotation.x = THREE.MathUtils.damp(armR.current.rotation.x, axb, 6, d);
+        armR.current.rotation.z = THREE.MathUtils.damp(armR.current.rotation.z, azRb, 6, d);
+      }
+
+      /* head: eyes toward the sky as he rises, then settles on the visitor */
+      if (head.current) {
+        head.current.rotation.x = THREE.MathUtils.damp(
+          head.current.rotation.x,
+          (1 - rise) * 0.5 - state.pointer.y * 0.2 * rise,
+          5,
+          d,
+        );
+        head.current.rotation.y = THREE.MathUtils.damp(
+          head.current.rotation.y,
+          state.pointer.x * 0.5 * rise,
+          5,
+          d,
+        );
+        head.current.rotation.z = THREE.MathUtils.damp(head.current.rotation.z, 0, 5, d);
+      }
+      return; // boot owns this frame; the activity loop resumes afterwards
+    }
 
     /* movement: roam the floor, or walk UP TO a card and interact with it */
     let faceY: number;

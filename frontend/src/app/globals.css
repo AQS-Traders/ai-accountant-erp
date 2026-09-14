@@ -391,6 +391,12 @@ body {
   }
 }
 
+/* Display-face utility: every large landing-page heading uses the same
+   Bodoni Moda didone as the hero h1 — one consistent editorial voice. */
+@utility bodoni-display {
+  font-family: var(--font-bodoni), Georgia, serif;
+}
+
 /* Light-sweep that flashes across the surface as the cursor arrives */
 @utility btn-shine {
   overflow: hidden;

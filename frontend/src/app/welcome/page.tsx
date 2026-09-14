@@ -1072,7 +1072,7 @@ export default function WelcomePage() {
             <span className="text-xs font-bold text-ai-700 uppercase tracking-widest mb-3 block">
               Features
             </span>
-            <h2 className="text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
+            <h2 className="bodoni-display text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
               Everything your <span className="text-aurora italic">accountant</span> needs
             </h2>
             <p className="text-[#3d4b66] text-lg max-w-2xl mx-auto">
@@ -1104,7 +1104,7 @@ export default function WelcomePage() {
             <span className="text-xs font-bold text-indigo-600 uppercase tracking-widest mb-3 block">
               The Core Workflow
             </span>
-            <h2 className="text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
+            <h2 className="bodoni-display text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
               From <span className="text-aurora italic">words</span> to financial statements
             </h2>
             <p className="text-[#3d4b66] text-lg max-w-2xl mx-auto">
@@ -1201,7 +1201,7 @@ export default function WelcomePage() {
                 <div className="lp-shape lp-shape-square !w-16 !h-16 !top-8 !left-10 opacity-70" />
 
                 <div className="relative z-10">
-                  <h2 className="text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
+                  <h2 className="bodoni-display text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
                     Ready to <span className="text-aurora italic">automate</span> your accounting?
                   </h2>
                   <p className="text-[#3d4b66] text-lg max-w-xl mx-auto mb-8">
@@ -1230,7 +1230,7 @@ export default function WelcomePage() {
             <span className="text-xs font-bold text-rose-600 uppercase tracking-widest mb-3 block">
               Contact
             </span>
-            <h2 className="text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
+            <h2 className="bodoni-display text-3xl sm:text-4xl font-bold text-brand-navy mb-4">
               Built by <span className="text-aurora italic">Zameer Haider</span>
             </h2>
             <p className="text-[#3d4b66] text-lg max-w-xl mx-auto">
