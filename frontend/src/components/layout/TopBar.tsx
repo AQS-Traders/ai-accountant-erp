@@ -79,10 +79,10 @@ export default function TopBar() {
       </div>
 
       <div className="flex items-center gap-1 shrink-0">
-        <button className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-muted transition-all hover:scale-110 active:scale-95">
+        <button className="p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-muted transition-[color,background-color,transform] duration-150 ease-out hover:scale-110 active:scale-95">
           <Search className="w-4 h-4" />
         </button>
-        <button className="relative p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-muted transition-all hover:scale-110 active:scale-95">
+        <button className="relative p-2 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-muted transition-[color,background-color,transform] duration-150 ease-out hover:scale-110 active:scale-95">
           <Bell className="w-4 h-4" />
           <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-error-500 rounded-full ring-2 ring-bg-surface" />
         </button>

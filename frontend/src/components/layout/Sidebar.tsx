@@ -42,6 +42,16 @@ const navItems: NavItem[] = [
       { label: "Purchase Returns", href: "/purchases/returns" },
     ],
   },
+  {
+    label: "Accounting", icon: BookOpen,
+    tone: { icon: "text-rose-600", chip: "bg-rose-50" },
+    children: [
+      { label: "Chart of Accounts", href: "/accounting/chart-of-accounts" },
+      { label: "Journal", href: "/accounting/journal" },
+      { label: "General Ledger", href: "/accounting/general-ledger" },
+      { label: "Trial Balance", href: "/accounting/trial-balance" },
+    ],
+  },
   { label: "Customers", href: "/customers", icon: Users,
     tone: { icon: "text-info-600", chip: "bg-info-50" } },
   { label: "Suppliers", href: "/suppliers", icon: Truck,
@@ -56,16 +66,6 @@ const navItems: NavItem[] = [
     tone: { icon: "text-emerald-600", chip: "bg-emerald-50" } },
   { label: "Banking", href: "/banking", icon: Landmark,
     tone: { icon: "text-sky-600", chip: "bg-sky-50" } },
-  {
-    label: "Accounting", icon: BookOpen,
-    tone: { icon: "text-rose-600", chip: "bg-rose-50" },
-    children: [
-      { label: "Chart of Accounts", href: "/accounting/chart-of-accounts" },
-      { label: "Journal", href: "/accounting/journal" },
-      { label: "General Ledger", href: "/accounting/general-ledger" },
-      { label: "Trial Balance", href: "/accounting/trial-balance" },
-    ],
-  },
   {
     label: "Reports", icon: BarChart3,
     tone: { icon: "text-fuchsia-600", chip: "bg-fuchsia-50" },
@@ -91,10 +91,9 @@ export default function Sidebar() {
   const [mounted, setMounted] = useState(false);
   const asideRef = useRef<HTMLElement>(null);
 
-  // Entrance animation fires once on initial mount only
+  // Entrance animation fires once on initial mount (no artificial delay)
   useEffect(() => {
-    const t = setTimeout(() => setMounted(true), 50);
-    return () => clearTimeout(t);
+    setMounted(true);
   }, []);
 
   const toggleGroup = (label: string) => {
@@ -158,7 +157,7 @@ export default function Sidebar() {
               <button
                 onClick={() => toggleGroup(item.label)}
                 className={cn(
-                  "group w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-all duration-200 hover-glow",
+                  "group w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-[background-color,color,box-shadow,transform] duration-150 ease-out hover-glow",
                   active
                     ? "text-brand-navy bg-sidebar-active-bg shadow-sm"
                     : "text-sidebar-nav hover:text-brand-navy hover:bg-sidebar-hover hover:translate-x-1",
@@ -214,7 +213,7 @@ export default function Sidebar() {
             key={item.href!}
             href={item.href!}
             className={cn(
-              "group flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-all duration-200 hover-glow",
+              "group flex items-center gap-2.5 px-3 py-2 rounded-xl text-[13px] font-medium transition-[background-color,color,box-shadow,transform] duration-150 ease-out hover-glow",
               active
                 ? "text-brand-navy bg-sidebar-active-bg shadow-sm"
                 : "text-sidebar-nav hover:text-brand-navy hover:bg-sidebar-hover hover:translate-x-1",
@@ -292,7 +291,7 @@ export default function Sidebar() {
       <aside
         ref={asideRef}
         className={cn(
-          "hidden lg:flex flex-col bg-gradient-to-b from-sidebar-bg/75 to-sidebar-bg-end/75 backdrop-blur-xl border-r border-sidebar-border transition-all duration-200 shrink-0 print:hidden",
+          "hidden lg:flex flex-col bg-gradient-to-b from-sidebar-bg/75 to-sidebar-bg-end/75 backdrop-blur-xl border-r border-sidebar-border transition-[width] duration-200 ease-out shrink-0 print:hidden",
           collapsed ? "w-[68px]" : "w-[252px]",
         )}
       >
