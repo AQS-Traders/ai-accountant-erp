@@ -9,11 +9,15 @@
 /* white glossy shell, deep-teal accents, dark glass visor, glowing    */
 /* cyan face, "Ai" chest badge, tablet in hand (see robot/RobotModel). */
 /*                                                                      */
-/* Behaviour: boot — he is part of the hero floor from frame one (lying
-   flat, no fall-in), rises zombie-style, stretches awake, waves hello —
-   then a random activity loop: wave · idle · walk · hop · dance · clap ·
-   read · sit — roaming the stage's empty areas. The facial expression
-   follows the activity (excited / sleepy / focus).
+/* Behaviour: boot — he stands planted on the hero floor from frame one
+   (no fall-in, no lie-down): a ~1s hands+eyes wake (soft two-arm wave
+   while the eyes brighten and scan), a short ready-beat, then a random
+   activity loop with a BIG repertoire of saved actions — wave · idle ·
+   walk · hop · dance · clap · read · sit · spin · stretch · think ·
+   march · peek · jumping jack · fist pump · air guitar · shrug ·
+   salute · box · twist · cheer · yoga · robot dance · kung fu · bow ·
+   meditate — roaming the stage and poking the floating cards. The
+   facial expression follows the activity (excited / sleepy / focus).
    Falls back to a calm idle under prefers-reduced-motion. */
 /* ================================================================== */
 
@@ -28,7 +32,8 @@ type Variant = "hero" | "compact";
 type Phase =
   | "boot" | "wave" | "idle" | "walk" | "hop" | "dance" | "clap" | "read" | "sit"
   | "interact" | "spin" | "stretch" | "think" | "march" | "peek" | "jumpingjack"
-  | "robotdance" | "moonwalk" | "conductor" | "kungfu" | "bow" | "cartwheel" | "meditate";
+  | "robotdance" | "moonwalk" | "conductor" | "kungfu" | "bow" | "cartwheel" | "meditate"
+  | "fistpump" | "airguitar" | "shrug" | "salute" | "box" | "twist" | "cheer" | "yoga";
 type PokeTarget = "invoice" | "journal" | "trial" | "overview" | "ask";
 
 /* Hero hotspots Ledger can walk up to and physically interact with.
@@ -77,7 +82,9 @@ function faceForPhase(p: Phase): FaceMode {
   if (p === "read" || p === "think") return "focus";
   if (p === "spin" || p === "jumpingjack" || p === "march" || p === "peek" || p === "stretch") return "excited";
   if (p === "robotdance" || p === "moonwalk" || p === "conductor" || p === "kungfu" || p === "cartwheel") return "excited";
-  if (p === "meditate") return "focus";
+  if (p === "meditate" || p === "yoga") return "focus";
+  if (p === "fistpump" || p === "cheer" || p === "box" || p === "twist"
+    || p === "airguitar" || p === "salute") return "excited";
   return "happy";
 }
 
@@ -92,6 +99,14 @@ const COMMAND_DUR: Record<string, number> = {
   bow: 2.8,
   cartwheel: 1.7,
   meditate: 3.8,
+  fistpump: 2.6,
+  airguitar: 3.4,
+  shrug: 2.8,
+  salute: 2.6,
+  box: 3.2,
+  twist: 3.2,
+  cheer: 3.0,
+  yoga: 3.6,
 };
 
 function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }) {
@@ -104,14 +119,13 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
   const face = useRef<FaceMode>("happy");
 
   /* --- behaviour state (refs on purpose: 60fps, no re-renders) --- */
-  /* Boot sequence on load: Ledger starts lying flat (zombie-rest), stands
-     up in place, then activates with a stretch + wave before the ambient
-     activity loop takes over. NO falling-from-above entrance — he is a
-     native part of the hero; the stage simply opens on him already lying
-     there, and he rises. */
+  /* Boot on load: Ledger is ALREADY standing on the hero floor — no
+     fall-in, no lie-down, no rise. He wakes in place: ~1s of hands+eyes
+     only (soft two-arm wave while the eyes brighten and scan), a short
+     ready-beat, then the ambient activity loop takes over. */
   const phase = useRef<Phase>("boot");
   const t = useRef(0);
-  const dur = useRef(reduced ? Infinity : 5.0); // boot runs ~5s, then loop
+  const dur = useRef(reduced ? Infinity : 2.6); // boot runs ~2.6s, then loop
   const dir = useRef<1 | -1>(1);
   useEffect(() => {
     dir.current = Math.random() > 0.5 ? 1 : -1;
@@ -166,13 +180,13 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
     t.current += d;
     const time = state.clock.elapsedTime;
 
-    /* ---- BOOT SEQUENCE (once per load) ----
-       0.0-1.2s lying flat (visitors see him "asleep"), 1.2-3.0s zombie
-       stand-up (pitch 90->0, knees bend), 3.0-4.0s activation stretch
-       (arms to the sky, up on toes), 4.0-5.0s hello wave. Then the
-       normal activity loop takes over. */
+    /* ---- BOOT (once per load) ----
+       He is standing from frame one. 0.0-1.0s hands+eyes wake (soft
+       two-arm wave, eyes brighten + scan), 1.0-2.6s a calm ready-beat
+       (still body, eyes locked on the visitor). Then the normal
+       activity loop takes over. */
     if (phase.current === "boot") {
-      if (reduced || t.current >= 5.0) {
+      if (reduced || t.current >= 2.6) {
         phase.current = "idle";
         t.current = 0;
         dur.current = rand(2.4, 3.2);
@@ -185,9 +199,13 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
       const canPoke = wide && variant === "hero";
       const pool: Phase[] = canPoke
         ? ["walk", "walk", "idle", "wave", "dance", "clap", "read", "sit", "hop",
-           "interact", "interact", "spin", "stretch", "think", "march", "peek", "jumpingjack"]
+           "interact", "interact", "spin", "stretch", "think", "march", "peek",
+           "jumpingjack", "fistpump", "airguitar", "shrug", "salute", "box",
+           "twist", "cheer", "yoga", "robotdance", "kungfu", "bow", "meditate"]
         : ["walk", "walk", "idle", "wave", "dance", "clap", "read", "sit", "hop",
-           "spin", "stretch", "think", "march", "peek", "jumpingjack"];
+           "spin", "stretch", "think", "march", "peek", "jumpingjack", "fistpump",
+           "airguitar", "shrug", "salute", "box", "twist", "cheer", "yoga",
+           "robotdance", "kungfu", "bow", "meditate"];
       let next = pick(pool);
       if (next === phase.current) next = pick(pool);
       phase.current = next;
@@ -216,51 +234,42 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
     }
     if (reduced) phase.current = "idle";
     const p = phase.current;
-    /* Boot face: eyes closed while down, wide awake once he's up */
+    /* Boot face: eyes closed for the first beat, wide awake as he waves */
     face.current =
       p === "boot"
-        ? t.current < 2.2 ? "sleepy" : "excited"
+        ? t.current < 0.6 ? "sleepy" : "excited"
         : faceForPhase(p);
 
-    /* ---- BOOT motion: zombie stand-up, activation stretch, hello wave.
-       Runs in place on the hero floor — no travel, no falling-in. ---- */
+    /* ---- BOOT motion: wake IN PLACE — no lie-down, no rise.
+       0-1.0s hands+eyes only (soft two-arm wake wave, eyes brighten and
+       scan), 1.0-2.6s a calm ready-beat with the body perfectly still. */
     if (p === "boot") {
-      const stand = THREE.MathUtils.clamp((t.current - 1.2) / 1.8, 0, 1);
-      const rise = stand * stand * (3 - 2 * stand); // smoothstep ease
-      const stretchT = THREE.MathUtils.clamp((t.current - 3.0) / 1.0, 0, 1);
-      const waveT = THREE.MathUtils.clamp((t.current - 4.0) / 1.0, 0, 1);
+      const wake = THREE.MathUtils.smoothstep(t.current, 0.0, 0.5);
+      const settle = THREE.MathUtils.smoothstep(t.current, 1.0, 1.9);
+      const armAmt = wake * (1 - settle);
 
-      /* flat on his back -> upright, exactly where he lies */
-      g.rotation.x = (1 - rise) * (Math.PI / 2);
+      /* standing still, exactly where he stands */
+      g.rotation.x = 0;
       g.rotation.y = 0;
       g.rotation.z = 0;
       g.position.x = THREE.MathUtils.damp(g.position.x, 0, 2, d);
       g.position.z = THREE.MathUtils.damp(g.position.z, 0.1, 2, d);
-      const kneeBend = Math.sin(rise * Math.PI) * 0.22;
-      g.position.y = THREE.MathUtils.damp(
-        g.position.y,
-        (1 - rise) * 0.02 + kneeBend * 0.1 + Math.sin(time * 2) * 0.02,
-        8,
-        d,
-      );
+      g.position.y = THREE.MathUtils.damp(g.position.y, Math.sin(time * 2) * 0.02, 8, d);
 
-      /* knees bend mid-rise, straighten once standing */
+      /* legs stay straight — he is planted on the floor */
       if (legL.current) {
-        legL.current.rotation.x = THREE.MathUtils.damp(legL.current.rotation.x, kneeBend * 1.6, 6, d);
+        legL.current.rotation.x = THREE.MathUtils.damp(legL.current.rotation.x, 0, 6, d);
         legL.current.rotation.z = THREE.MathUtils.damp(legL.current.rotation.z, 0, 6, d);
       }
       if (legR.current) {
-        legR.current.rotation.x = THREE.MathUtils.damp(legR.current.rotation.x, kneeBend * 1.6, 6, d);
+        legR.current.rotation.x = THREE.MathUtils.damp(legR.current.rotation.x, 0, 6, d);
         legR.current.rotation.z = THREE.MathUtils.damp(legR.current.rotation.z, 0, 6, d);
       }
 
-      /* arms: resting while down -> sky stretch -> hello wave */
-      const stretchAmt = stretchT * (1 - waveT);
-      const azLb = -0.1 + (-2.45 + Math.sin(t.current * 5) * 0.08) * stretchAmt;
-      const azRb = 0.1
-        + (2.45 - Math.sin(t.current * 5) * 0.08) * stretchAmt
-        + waveT * (2.25 + Math.sin(t.current * 9) * 0.3);
-      const axb = -0.3 * stretchAmt;
+      /* hands: rise out to the sides, wave twice, settle back to rest */
+      const azLb = -(0.08 + 2.3 * armAmt + Math.sin(t.current * 9) * 0.18 * armAmt);
+      const azRb = 0.08 + 2.3 * armAmt + Math.sin(t.current * 9 + Math.PI) * 0.18 * armAmt;
+      const axb = -0.12 * armAmt;
       if (armL.current) {
         armL.current.rotation.x = THREE.MathUtils.damp(armL.current.rotation.x, axb, 6, d);
         armL.current.rotation.z = THREE.MathUtils.damp(armL.current.rotation.z, azLb, 6, d);
@@ -270,17 +279,18 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
         armR.current.rotation.z = THREE.MathUtils.damp(armR.current.rotation.z, azRb, 6, d);
       }
 
-      /* head: eyes toward the sky as he rises, then settles on the visitor */
+      /* eyes/head: scan left -> right, then lock on the visitor */
       if (head.current) {
+        const scan = Math.sin(Math.min(t.current, 1.0) * Math.PI * 2) * 0.55 * (1 - settle);
         head.current.rotation.x = THREE.MathUtils.damp(
           head.current.rotation.x,
-          (1 - rise) * 0.5 - state.pointer.y * 0.2 * rise,
+          -state.pointer.y * 0.2,
           5,
           d,
         );
         head.current.rotation.y = THREE.MathUtils.damp(
           head.current.rotation.y,
-          state.pointer.x * 0.5 * rise,
+          scan + state.pointer.x * 0.5 * settle,
           5,
           d,
         );
@@ -332,8 +342,12 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
     } else if (p === "clap" || p === "read" || p === "sit" || p === "spin"
       || p === "march" || p === "jumpingjack" || p === "stretch" || p === "think"
       || p === "robotdance" || p === "conductor" || p === "kungfu" || p === "bow"
-      || p === "cartwheel" || p === "meditate") {
+      || p === "cartwheel" || p === "meditate" || p === "fistpump" || p === "airguitar"
+      || p === "shrug" || p === "salute" || p === "box" || p === "cheer" || p === "yoga") {
       faceY = 0;
+    } else if (p === "twist") {
+      /* the twist — he sways his whole body with the beat */
+      faceY = Math.sin(t.current * 5) * 0.3;
     } else {
       faceY = Math.sin(time * 0.6) * 0.12;
     }
@@ -341,7 +355,8 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
        clap, spin, stretch, jumping jacks) drift him back toward the centre
        so his hand can never cross the canvas border */
     if (!hs && (p === "wave" || p === "dance" || p === "clap" || p === "spin"
-      || p === "stretch" || p === "jumpingjack" || p === "cartwheel")) {
+      || p === "stretch" || p === "jumpingjack" || p === "cartwheel"
+      || p === "fistpump" || p === "cheer" || p === "yoga")) {
       g.position.x = THREE.MathUtils.damp(g.position.x, g.position.x * 0.3, 1.5, d);
     }
     g.position.z = THREE.MathUtils.damp(g.position.z, zTarget.current, 2, d);
@@ -374,7 +389,11 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
               ? Math.max(0, Math.sin(t.current * 3.2)) * 0.04
               : p === "cartwheel"
                 ? Math.sin(Math.min(t.current / 1.7, 1) * Math.PI) * 0.55
-                : 0;
+                : p === "cheer"
+                  ? Math.max(0, Math.sin(t.current * 6)) * 0.12
+                  : p === "box"
+                    ? Math.abs(Math.sin(t.current * 8)) * 0.04
+                    : 0;
     const sitY = p === "sit" ? -0.3 : 0;
     const toeY = p === "stretch" ? 0.06 : 0;
     const medY = p === "meditate" ? 0.22 + Math.sin(t.current * 1.4) * 0.05 : 0;
@@ -495,6 +514,57 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
       axL = axR = -0.72;
       azL = -0.3;
       azR = 0.3;
+    } else if (p === "fistpump") {
+      /* victory! right fist thrusts to the sky on the beat */
+      const pump = Math.sin(t.current * 6);
+      axR = -2.3 + pump * 0.35;
+      azR = 0.45;
+      axL = -0.3;
+      azL = -0.35 + Math.cos(t.current * 6) * 0.12;
+    } else if (p === "airguitar") {
+      /* power stance, left hand frets high while the right saws strings */
+      axL = -1.35;
+      azL = -0.75;
+      axR = -1.0;
+      azR = 0.9 + Math.sin(t.current * 11) * 0.5;
+    } else if (p === "shrug") {
+      /* both palms up, lifted — "the numbers speak for themselves" */
+      const lift = 0.5 + Math.sin(t.current * 2.2) * 0.08;
+      axL = axR = -0.55;
+      azL = -lift;
+      azR = lift;
+    } else if (p === "salute") {
+      /* crisp right hand snaps to the brow, holds, then drops */
+      const hold = THREE.MathUtils.smoothstep(t.current, 0.15, 0.55);
+      axR = -1.9 * hold;
+      azR = 0.95 * hold + 0.05 * (1 - hold);
+      azL = -0.12;
+    } else if (p === "box") {
+      /* alternating jabs with light footwork bounce */
+      const jabL = Math.max(0, Math.sin(t.current * 8));
+      const jabR = Math.max(0, Math.cos(t.current * 8));
+      axL = -0.8 - jabL * 0.8;
+      azL = -0.35;
+      axR = -0.8 - jabR * 0.8;
+      azR = 0.35;
+    } else if (p === "twist") {
+      /* classic twist — arms swing opposite the hips on the beat */
+      const s = Math.sin(t.current * 5);
+      azL = -0.9 + s * 0.7;
+      azR = 0.9 + s * 0.7;
+      axL = axR = -0.35;
+    } else if (p === "cheer") {
+      /* both arms up shaking pom-poms, tiny hop on the beat */
+      const shk = Math.sin(t.current * 12) * 0.22;
+      azL = -2.4 + shk;
+      azR = 2.4 - shk;
+      axL = axR = -0.35;
+    } else if (p === "yoga") {
+      /* tree pose — arms form an overhead arch, breathing sway */
+      const sway = Math.sin(t.current * 1.8) * 0.1;
+      azL = -2.2 + sway;
+      azR = 2.2 - sway;
+      axL = axR = -0.5;
     } else {
       azL = -0.08 + Math.sin(time * 1.7) * 0.05;
       azR = 0.08 - Math.sin(time * 1.7) * 0.05;
@@ -515,6 +585,14 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
       /* crossed-lotus suggestion while levitating */
       dampTo(legL, 0.85, -0.55);
       dampTo(legR, 0.85, 0.55);
+    } else if (p === "yoga") {
+      /* tree pose — left leg folded against the right, standing tall */
+      dampTo(legL, 0.9, -0.5);
+      dampTo(legR, 0, 0);
+    } else if (p === "airguitar") {
+      /* wide power stance */
+      dampTo(legL, 0, -0.28);
+      dampTo(legR, 0, 0.28);
     } else {
       const moonSwing = p === "moonwalk" ? Math.sin(t.current * 3) * 0.25 : 0;
       dampTo(legL, sitLeg + legSwing + moonSwing, 0);
@@ -533,11 +611,13 @@ function RobotActor({ variant, reduced }: { variant: Variant; reduced: boolean }
           ? Math.sin(Math.min(t.current * 1.6, Math.PI)) * 0.3
           : p === "think"
             ? 0.14
-            : p === "robotdance"
-              ? Math.floor(t.current * 2) % 2
-                ? 0.12
-                : -0.08
-              : 0;
+            : p === "shrug"
+              ? 0.18
+              : p === "robotdance"
+                ? Math.floor(t.current * 2) % 2
+                  ? 0.12
+                  : -0.08
+                : 0;
       head.current.rotation.x = THREE.MathUtils.damp(head.current.rotation.x, down + look, 5, d);
       head.current.rotation.y = reduced
         ? 0
