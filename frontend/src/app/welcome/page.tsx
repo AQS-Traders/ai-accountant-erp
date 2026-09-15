@@ -89,19 +89,20 @@ function LinkedInIcon({ className }: { className?: string }) {
     </svg>
   );
 }
-/* ---- Rotating hero taglines (the POWER WORDS) --------------------
-   Rendered in Bodoni Moda ITALIC with the BRAND colour (teal→cyan —
-   the same brand ramp as every CTA and the text-aurora accent), so
-   the power words read unmistakably as the brand's voice. Dwell
-   times vary 2.8–3.6s for an organic cadence. Rotation pauses under
-   prefers-reduced-motion (the first variant then remains). */
+/* ---- Rotating hero headline --------------------------------------
+   Five FULL-SENTENCE headlines (the old word-sized "power words" are
+   gone, along with the "Your Books," lead-in — these lines stand on
+   their own). Still rendered in Bodoni Moda ITALIC with the brand ramp
+   so they read as the brand's voice. Dwell times scale with length
+   (~75ms/char) so a long sentence is comfortably readable before it
+   crossfades. Rotation pauses under prefers-reduced-motion (the first
+   line then remains). */
 const HERO_TAGLINES = [
-  { text: "Smarter with AI.", dur: 3000 },
-  { text: "Effortless. Intelligent.", dur: 3400 },
-  { text: "Always Balanced.", dur: 2800 },
-  { text: "Precision on Autopilot.", dur: 3600 },
-  { text: "Powered by Intelligence.", dur: 3000 },
-  { text: "Built to Grow With You.", dur: 3200 },
+  { text: "No Accountant? No Problem. Run Your Books Yourself.", dur: 5400 },
+  { text: "Built for Founders Who Don't Speak Accounting.", dur: 4600 },
+  { text: "Fire Your Bookkeeper. Hire Your AI Agent.", dur: 4500 },
+  { text: "The AI-Native ERP That Replaces the Need for an Accountant.", dur: 5800 },
+  { text: "Just Type What Happened. Our AI Does the Accounting.", dur: 5100 },
 ] as const;
 
 /* Brand gradient shared by every tagline variant */
@@ -747,17 +748,16 @@ export default function WelcomePage() {
             </p>
 
             <h1
-              className="text-brand-navy text-[2.3rem] sm:text-5xl lg:text-[3.4rem] leading-[1.14] tracking-[0.01em] font-bold"
+              className="text-brand-navy text-[1.55rem] sm:text-[1.9rem] lg:text-[2.25rem] leading-[1.26] tracking-[0.01em] font-bold max-w-[36rem]"
               style={{ fontFamily: "var(--font-bodoni), Georgia, serif" }}
             >
-              <span className="sr-only">
-                Your Books, {HERO_TAGLINES[0].text}
-              </span>
+              {/* The rotating sentence IS the headline: these lines are
+                  complete sentences, so the old "Your Books," lead-in is
+                  gone. sr-only keeps one canonical line for crawlers and
+                  assistive tech. */}
+              <span className="sr-only">{HERO_TAGLINES[0].text}</span>
               <span className="reveal-line" aria-hidden="true">
-                <span style={{ "--d": "200ms" } as React.CSSProperties}>Your Books,</span>
-              </span>
-              <span className="reveal-line" aria-hidden="true">
-                <span style={{ "--d": "420ms" } as React.CSSProperties}>
+                <span style={{ "--d": "220ms" } as React.CSSProperties}>
                   <HeroTagline />
                 </span>
               </span>

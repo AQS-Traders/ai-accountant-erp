@@ -14,7 +14,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Bot, Send, Sparkles, X } from "lucide-react";
-import { ChatCircleDots } from "@phosphor-icons/react";
 
 type Msg = { role: "user" | "assistant"; text: string };
 
@@ -24,6 +23,103 @@ const GREETING: Msg = {
   role: "assistant",
   text: "Hi! I'm Ledger — ask me anything about AI Accountant or its founder, Zameer Haider. (Informational questions only — your business data lives safely inside the app.)",
 };
+
+/* ---- Multi-colour 3D robot mark -------------------------------------
+   A self-contained, resolution-independent 3D-styled robot: layered
+   gradients + specular gloss + a contact shade give it real volume, and
+   the palette is genuinely multi-colour (white shell · teal ear pods ·
+   amber antenna · glowing cyan eyes · indigo visor). Inline SVG, so there
+   is no image request, no icon-font dependency and no WebGL cost. */
+function RobotMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id="pb3dShell" x1="0.1" y1="0" x2="0.5" y2="1">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="48%" stopColor="#eaf7fa" />
+          <stop offset="100%" stopColor="#b9dff0" />
+        </linearGradient>
+        <linearGradient id="pb3dVisor" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stopColor="#16304f" />
+          <stop offset="55%" stopColor="#1d4166" />
+          <stop offset="100%" stopColor="#0a1b2e" />
+        </linearGradient>
+        <linearGradient id="pb3dPod" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#5eead4" />
+          <stop offset="55%" stopColor="#14b8a6" />
+          <stop offset="100%" stopColor="#0e7490" />
+        </linearGradient>
+        <linearGradient id="pb3dAntenna" x1="0.2" y1="0" x2="0.8" y2="1">
+          <stop offset="0%" stopColor="#fde68a" />
+          <stop offset="45%" stopColor="#fbbf24" />
+          <stop offset="100%" stopColor="#f97316" />
+        </linearGradient>
+        <linearGradient id="pb3dStem" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#0e7490" />
+          <stop offset="100%" stopColor="#134e5e" />
+        </linearGradient>
+        <radialGradient id="pb3dEye" cx="0.36" cy="0.3" r="0.85">
+          <stop offset="0%" stopColor="#ffffff" />
+          <stop offset="42%" stopColor="#7dd3fc" />
+          <stop offset="100%" stopColor="#0e7490" />
+        </radialGradient>
+        <linearGradient id="pb3dGloss" x1="0" y1="0" x2="0.7" y2="1">
+          <stop offset="0%" stopColor="#ffffff" stopOpacity="0.95" />
+          <stop offset="100%" stopColor="#ffffff" stopOpacity="0" />
+        </linearGradient>
+        <linearGradient id="pb3dShade" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#5b9fc4" stopOpacity="0" />
+          <stop offset="100%" stopColor="#5b9fc4" stopOpacity="0.45" />
+        </linearGradient>
+        <radialGradient id="pb3dGlow" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.5" />
+          <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
+        </radialGradient>
+        {/* interior shading/gloss is clipped to the head silhouette so the
+            volume never spills outside the robot */}
+        <clipPath id="pb3dHeadClip">
+          <rect x="8.6" y="10.6" width="30.8" height="28.6" rx="11.4" />
+        </clipPath>
+      </defs>
+      <circle cx="24" cy="27" r="21" fill="url(#pb3dGlow)" />
+
+      {/* contact shade that grounds the mark */}
+      <ellipse cx="24" cy="42.6" rx="12.4" ry="2.5" fill="#0f172a" opacity="0.13" />
+
+      {/* antenna: dark-teal stem + amber ball with a specular dot */}
+      <rect x="22.7" y="5.6" width="2.6" height="6.8" rx="1.3" fill="url(#pb3dStem)" />
+      <circle cx="24" cy="5.4" r="4.3" fill="url(#pb3dAntenna)" />
+      <circle cx="22.5" cy="4.0" r="1.35" fill="#ffffff" opacity="0.8" />
+
+      {/* teal ear pods, each with a darker inner disc */}
+      <rect x="4.4" y="18.6" width="6.6" height="12.4" rx="3.3" fill="url(#pb3dPod)" />
+      <rect x="37" y="18.6" width="6.6" height="12.4" rx="3.3" fill="url(#pb3dPod)" />
+      <ellipse cx="7.7" cy="24.8" rx="2" ry="3.3" fill="#0f766e" opacity="0.5" />
+      <ellipse cx="40.3" cy="24.8" rx="2" ry="3.3" fill="#0f766e" opacity="0.5" />
+
+      {/* head shell */}
+      <rect x="8.6" y="10.6" width="30.8" height="28.6" rx="11.4" fill="url(#pb3dShell)" />
+
+      {/* volume: bottom interior shade + top specular gloss (clipped) */}
+      <g clipPath="url(#pb3dHeadClip)">
+        <rect x="8.6" y="28.6" width="30.8" height="10.6" fill="url(#pb3dShade)" />
+        <path d="M13.4 12.4c5.8-2.6 15.4-2.6 20.4 0-3.4 2.2-17 2.2-20.4 0z" fill="url(#pb3dGloss)" />
+      </g>
+
+      {/* indigo visor + a soft glass streak */}
+      <rect x="13.2" y="18.2" width="21.6" height="12.8" rx="6" fill="url(#pb3dVisor)" />
+      <path d="M16.6 20.6c4-1.5 11-1.7 14.8-0.5" stroke="#ffffff" strokeOpacity="0.32" strokeWidth="1.5" strokeLinecap="round" fill="none" />
+
+      {/* glowing cyan eyes */}
+      <circle cx="19.5" cy="24.4" r="3.2" fill="url(#pb3dEye)" />
+      <circle cx="28.5" cy="24.4" r="3.2" fill="url(#pb3dEye)" />
+
+      {/* friendly smile */}
+      <path d="M20.6 33.1c1 1.3 2.2 1.9 3.4 1.9s2.4-0.6 3.4-1.9" stroke="#0e7490" strokeWidth="1.7" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
 
 export default function FounderChat() {
   const [open, setOpen] = useState(false);
@@ -259,15 +355,15 @@ export default function FounderChat() {
           className="chat-launcher-core relative w-16 h-16 sm:w-[70px] sm:h-[70px] rounded-full bg-gradient-to-br from-teal-500 via-cyan-500 to-indigo-500 p-[3px] shadow-2xl shadow-teal-500/45 transition-all hover:-translate-y-1 active:scale-95"
           style={{ animation: "chatBob 3.4s ease-in-out infinite" }}
         >
-          {/* Premium Phosphor glyph on a bright core: the icon is BIGGER
-              (36px vs the old 28px) and genuinely COLOURED — a two-tone
-              teal duotone inside a vivid teal→cyan→indigo ring, with a
-              warm amber sparkle accent — instead of a plain white outline. */}
+          {/* Multi-colour 3D robot on a bright core: 40px of layered
+              gradient volume (white shell · teal pods · amber antenna ·
+              cyan eyes · indigo visor) inside the teal→cyan→indigo ring,
+              with the warm amber sparkle accent. */}
           <span className="w-full h-full rounded-full bg-white flex items-center justify-center">
             {open ? (
               <X className="w-8 h-8 text-brand-navy" strokeWidth={2.4} />
             ) : (
-              <ChatCircleDots className="w-9 h-9 text-teal-600" weight="duotone" aria-hidden="true" />
+              <RobotMark className="w-10 h-10 drop-shadow-[0_3px_6px_rgba(13,148,136,0.35)]" />
             )}
           </span>
           {!open && (
