@@ -111,6 +111,9 @@ export interface ActiveSessionInfo {
     status: string;
     current_phase: string | null;
     created_at: string | null;
+    /** Last control-plane write (backend ages stranded runs out on this). */
+    updated_at?: string | null;
+    age_seconds?: number | null;
   } | null;
 }
 

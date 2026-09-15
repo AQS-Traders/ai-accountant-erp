@@ -34,6 +34,10 @@ const cinzel = Cinzel({
   weight: ["400", "500", "600", "700"],
   variable: "--font-cinzel",
   display: "swap",
+  /* Only the hero face is preloaded. Chrome warned "preloaded but not used
+     within a few seconds" for the decorative families, which are swapped in
+     further down the page anyway. */
+  preload: false,
 });
 const cormorant = Cormorant_Garamond({
   subsets: ["latin"],
@@ -41,6 +45,7 @@ const cormorant = Cormorant_Garamond({
   style: ["normal", "italic"],
   variable: "--font-cormorant",
   display: "swap",
+  preload: false,
 });
 /* Fraunces — soft premium editorial serif (reference headline face) */
 const fraunces = Fraunces({
@@ -48,6 +53,7 @@ const fraunces = Fraunces({
   style: ["normal", "italic"],
   variable: "--font-fraunces",
   display: "swap",
+  preload: false,
 });
 /* Tagline faces: DM Serif Display (italic didone elegance) + Antic Didone
    (rendered bold via synthetic weight for the thick-hairline didone look) */
@@ -57,12 +63,14 @@ const dmSerif = DM_Serif_Display({
   style: ["normal", "italic"],
   variable: "--font-dm-serif",
   display: "swap",
+  preload: false,
 });
 const antic = Antic_Didone({
   subsets: ["latin"],
   weight: "400",
   variable: "--font-antic",
   display: "swap",
+  preload: false,
 });
 /* Bodoni Moda — the hero headline face (high-contrast didone, variable
    weight incl. bold 700 + italic for the power words). */

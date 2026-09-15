@@ -180,8 +180,18 @@ export default function DashboardPage() {
   }, [load]);
 
   const currency = org?.base_currency_code;
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+
+  /* Hydration safety: the time-of-day greeting is derived from the CLIENT
+     clock/timezone. Computing it during render made the server HTML
+     ("Good afternoon" — server runs UTC) differ from the first client render
+     ("Good evening" — visitor timezone), which React reports as error #418
+     (hydration failed: text content did not match). The greeting is therefore
+     localised AFTER mount, exactly like the rotating placeholder above. */
+  const [greeting, setGreeting] = useState("Welcome back");
+  useEffect(() => {
+    const hour = new Date().getHours();
+    setGreeting(hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening");
+  }, []);
 
   return (
     <div className="max-w-6xl mx-auto space-y-8">

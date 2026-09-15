@@ -45,6 +45,9 @@ export interface AgentRunState {
   liveSteps: AgentLiveStep[];
   response: AgentResponse | null;
   error: string;
+  /* Informational, non-blocking message (stranded run, run awaiting an
+     answer...). Unlike `error` it never implies the box is unusable. */
+  notice: string;
   reattached: boolean;
   stalledJobId: string | null;
 }
@@ -55,6 +58,7 @@ let state: AgentRunState = {
   liveSteps: [],
   response: null,
   error: "",
+  notice: "",
   reattached: false,
   stalledJobId: null,
 };
@@ -139,48 +143,122 @@ function runBackground(request: UserRequest) {
 /* ---- Reattach (page refresh mid-run) — module-level, idempotent ----
    The poller watches the latest in-flight session until it reaches a
    terminal state. It is NOT tied to any component: navigating away
-   and back never interrupts it, and unmounts cannot stop it. */
+   and back never interrupts it, and unmounts cannot stop it.
+
+   It is BOUNDED, though. A run whose serverless invocation was killed
+   mid-flight stays NON-TERMINAL in the database for ever; the watcher
+   used to re-attach to that corpse on every dashboard load, showing
+   "Processing" indefinitely and polling every 4s with no user input at
+   all (an unbounded API-call leak). It now backs off, gives up after
+   REATTACH_DEADLINE_MS, and reports a stranded run as a one-line notice
+   instead of a spinner that never ends. */
 let reattachStarted = false;
+
+/* Only these can still move: anything else is settled (or dead) and must
+   never be presented as a run in progress. */
+const LIVE_RUN_STATUSES = new Set(["PENDING", "PLANNING", "EXECUTING"]);
+const REATTACH_POLL_MS = 4000;
+const REATTACH_SLOW_POLL_MS = 10000;
+const REATTACH_SLOW_AFTER_MS = 60_000;
+const REATTACH_DEADLINE_MS = 180_000;
+const REATTACH_MAX_ERRORS = 4;
+
+const STRANDED_NOTICE =
+  "The previous run stopped reporting progress, so it was closed. It may have " +
+  "timed out - please send your request again.";
+const AWAITING_NOTICE =
+  "Your last request is still waiting for your answer. Send it again to continue.";
 
 function ensureReattach() {
   if (reattachStarted || state.loading) return;
   reattachStarted = true;
 
   (async () => {
+    let info;
     try {
-      const info = await latestActiveSession();
-      if (!info.found || !info.session) {
-        reattachStarted = false;
-        return;
-      }
-      const status = (info.session.status || "").toUpperCase();
-      const convId = info.session.conversation_id;
-      if (
-        (status === "EXECUTING" || status === "PLANNING" || status === "PENDING") &&
-        convId
-      ) {
-        set({ activeRequestId: convId, loading: true, reattached: true });
-      } else {
-        reattachStarted = false;
-        return;
-      }
-
-      const id = setInterval(async () => {
-        try {
-          const again = await latestActiveSession();
-          if (!again.found) {
-            clearInterval(id);
-            reattachStarted = false;
-            set({ loading: false, activeRequestId: null, reattached: false });
-            notifyDataChanged();
-          }
-        } catch {
-          /* keep polling — transient network errors must not detach */
-        }
-      }, 4000);
+      info = await latestActiveSession();
     } catch {
-      reattachStarted = false; /* backend offline — nothing to reattach */
+      reattachStarted = false; /* backend offline / not signed in */
+      return;
     }
+    if (!info.found || !info.session) {
+      reattachStarted = false;
+      return;
+    }
+
+    const status = (info.session.status || "").toUpperCase();
+    const convId = info.session.conversation_id;
+
+    /* Parked on a question: NOTHING is executing, so a spinner here would
+       spin for ever (only the user's answer resumes the run). Say what is
+       really going on and leave the input box free. */
+    if (status === "WAITING_FOR_USER") {
+      reattachStarted = false;
+      set({
+        notice: AWAITING_NOTICE,
+        loading: false,
+        activeRequestId: null,
+        reattached: false,
+      });
+      return;
+    }
+
+    if (!LIVE_RUN_STATUSES.has(status) || !convId) {
+      reattachStarted = false;
+      return;
+    }
+
+    const startedAt = Date.now();
+    let errors = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    set({ activeRequestId: convId, loading: true, reattached: true, notice: "" });
+
+    const stop = (notice?: string) => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+      reattachStarted = false;
+      set({
+        loading: false,
+        activeRequestId: null,
+        liveSteps: [],
+        reattached: false,
+        ...(notice ? { notice } : {}),
+      });
+    };
+
+    const step = async () => {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed > REATTACH_DEADLINE_MS) {
+        stop(STRANDED_NOTICE);
+        notifyDataChanged();
+        return;
+      }
+      try {
+        const again = await latestActiveSession();
+        errors = 0;
+        const live =
+          again.found &&
+          LIVE_RUN_STATUSES.has((again.session?.status || "").toUpperCase());
+        if (!live) {
+          stop();
+          notifyDataChanged(); /* finished while we were away */
+          return;
+        }
+      } catch {
+        errors += 1;
+        if (errors >= REATTACH_MAX_ERRORS) {
+          stop("Lost contact with the server while resuming your last run.");
+          return;
+        }
+      }
+      timer = setTimeout(
+        step,
+        elapsed > REATTACH_SLOW_AFTER_MS ? REATTACH_SLOW_POLL_MS : REATTACH_POLL_MS
+      );
+    };
+
+    timer = setTimeout(step, REATTACH_POLL_MS);
   })();
 }
 
@@ -207,6 +285,7 @@ export const agentRunStore = {
       loading: true,
       response: null,
       error: "",
+      notice: "",
       stalledJobId: null,
       reattached: false,
       liveSteps: [],
@@ -287,6 +366,11 @@ export const agentRunStore = {
 
   /* Dismiss the result card / dock chip after reading it. */
   dismissResult() {
-    set({ response: null, error: "", reattached: false, stalledJobId: null });
+    set({ response: null, error: "", notice: "", reattached: false, stalledJobId: null });
+  },
+
+  /* Dismiss the informational notice (stranded run / awaiting answer). */
+  dismissNotice() {
+    set({ notice: "" });
   },
 };

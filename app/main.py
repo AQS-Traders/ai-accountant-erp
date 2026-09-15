@@ -20,6 +20,7 @@ import re
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -29,7 +30,7 @@ from fastapi.responses import StreamingResponse
 
 from app.auth import AuthContext, authenticate_header
 from app.config import get_settings
-from app.database import fetch_many, fetch_one, insert_one
+from app.database import fetch_many, fetch_one, insert_one, set_session_phase
 from app.models.schemas import (
     AgentResponse,
     ClarificationAnswer,
@@ -558,19 +559,88 @@ async def list_sessions(
     return {"sessions": sessions, "count": len(sessions)}
 
 
+# ---------------------------------------------------------------------------
+# RESUME-BY-CONVERSATION — the stale-run window
+# ---------------------------------------------------------------------------
+# A run only ever advances while its serverless invocation is alive. When the
+# host kills that invocation (FUNCTION_INVOCATION_TIMEOUT, cold-start
+# eviction) nothing is left to write the terminal state, so the row stays
+# PENDING / PLANNING / EXECUTING for ever. Returning such a corpse made every
+# dashboard load re-attach to a dead run: an endless "Processing" spinner plus
+# a poll loop that never stopped, with no user input involved at all. Rows are
+# now aged out (and stamped FAILED) so a stranded run is never re-attached and
+# the leak cannot accumulate either.
+_ACTIVE_RUN_TTL_SECONDS = 180.0         # PENDING / PLANNING / EXECUTING
+_AWAITING_USER_TTL_SECONDS = 45 * 60.0  # WAITING_FOR_USER (human latency)
+_ACTIVE_RUN_STATUSES = {"PENDING", "PLANNING", "EXECUTING"}
+
+
+def _row_age_seconds(row: Dict[str, Any]) -> Optional[float]:
+    """Seconds since the row last moved (None when no timestamp parses).
+
+    ``updated_at`` is maintained by the ``set_updated_at()`` trigger, so it
+    tracks the last control-plane write for the session.
+    """
+    for key in ("updated_at", "started_at", "created_at"):
+        raw = row.get(key)
+        if not raw:
+            continue
+        try:
+            stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp).total_seconds()
+    return None
+
+
+async def _stamp_stranded_run(row: Dict[str, Any], age: float) -> None:
+    """Close a run whose executor died, so it stops being re-attached.
+
+    Best-effort by design: a failed write must never turn this resume
+    endpoint into a 500.
+    """
+    session_id = row.get("id")
+    if not session_id:
+        return
+    try:
+        await set_session_phase(
+            uuid.UUID(str(session_id)),
+            phase="FAILED",
+            status="FAILED",
+            completed=True,
+        )
+        log.info(
+            "api.latest_active.stranded_run_closed",
+            session_id=str(session_id),
+            status=row.get("status"),
+            age_seconds=round(age, 1),
+        )
+    except Exception as exc:  # noqa: BLE001 — resume must stay available
+        log.warning(
+            "api.latest_active.stranded_run_close_failed",
+            session_id=str(session_id),
+            error=str(exc)[:200],
+        )
+
+
 @app.get("/api/ai/sessions/latest-active")
 async def latest_active_session(
     auth: AuthContext = Depends(get_current_user),
 ):
     """Work Stream C: resume-by-conversation.
 
-    Returns the latest NON-TERMINAL execution session (status PENDING /
-    PLANNING / WAITING_FOR_USER / EXECUTING) for this user+org, so the
-    frontend can reattach the progress view after a browser refresh
-    instead of losing the live run. Terminal sessions (COMPLETED / FAILED /
-    CANCELLED) are never returned.
+    Returns the latest LIVE execution session for this user+org — PENDING /
+    PLANNING / EXECUTING, or WAITING_FOR_USER parked on a question — so the
+    frontend can reattach the progress view after a browser refresh instead of
+    losing the live run. Terminal sessions (COMPLETED / FAILED / CANCELLED) are
+    never returned.
+
+    Runs that stopped moving are treated as stranded (their executor was
+    killed mid-flight) and are closed rather than returned: a dead run must
+    never be re-attached, because nothing will ever finish it.
     """
-    non_terminal = {"PENDING", "PLANNING", "WAITING_FOR_USER", "EXECUTING"}
     sessions = await fetch_many(
         "ai_execution_sessions",
         filters={
@@ -578,20 +648,33 @@ async def latest_active_session(
             "user_id": str(auth.user_id),
         },
         order="created_at.desc",
-        limit=10,
+        limit=20,
     )
     for s in sessions or []:
-        if str(s.get("status") or "").upper() in non_terminal:
-            return {
-                "found": True,
-                "session": {
-                    "session_id": s.get("id"),
-                    "conversation_id": s.get("conversation_id"),
-                    "status": s.get("status"),
-                    "current_phase": s.get("current_phase"),
-                    "created_at": s.get("created_at"),
-                },
-            }
+        status = str(s.get("status") or "").upper()
+        if status not in _ACTIVE_RUN_STATUSES and status != "WAITING_FOR_USER":
+            continue  # terminal — never re-attach
+        age = _row_age_seconds(s)
+        ttl = (
+            _AWAITING_USER_TTL_SECONDS
+            if status == "WAITING_FOR_USER"
+            else _ACTIVE_RUN_TTL_SECONDS
+        )
+        if age is not None and age > ttl:
+            await _stamp_stranded_run(s, age)
+            continue
+        return {
+            "found": True,
+            "session": {
+                "session_id": s.get("id"),
+                "conversation_id": s.get("conversation_id"),
+                "status": status,
+                "current_phase": s.get("current_phase"),
+                "created_at": s.get("created_at"),
+                "updated_at": s.get("updated_at"),
+                "age_seconds": round(age, 1) if age is not None else None,
+            },
+        }
     return {"found": False, "session": None}
 
 

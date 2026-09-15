@@ -51,7 +51,7 @@ export default function AICommandBox() {
     agentRunStore.getSnapshot,
     agentRunStore.getSnapshot,
   );
-  const { loading, response, error, liveSteps, activeRequestId, reattached, stalledJobId } = run;
+  const { loading, response, error, notice, liveSteps, activeRequestId, reattached, stalledJobId } = run;
 
   /* Boot the reattach watcher once per session (module-level, idempotent):
      a page refresh mid-run resumes the live progress view. */
@@ -234,6 +234,23 @@ export default function AICommandBox() {
       {error && (
         <div className="p-3 rounded-xl bg-error-50 border border-error-100 text-sm text-error-600">
           {error}
+        </div>
+      )}
+
+      {/* Informational notice - e.g. a previous run was closed because it
+          stopped reporting progress. Never blocks the input: the user can
+          simply send a new request (or dismiss it). */}
+      {notice && !loading && (
+        <div className="p-3 rounded-xl bg-warning-50 border border-warning-100 text-sm text-text-secondary flex items-start justify-between gap-3">
+          <span>{notice}</span>
+          <button
+            type="button"
+            onClick={() => agentRunStore.dismissNotice()}
+            className="shrink-0 text-text-muted hover:text-text-primary transition-colors"
+            aria-label="Dismiss notice"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
 

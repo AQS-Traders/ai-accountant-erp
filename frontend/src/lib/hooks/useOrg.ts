@@ -42,6 +42,21 @@ interface OrgSnapshot {
 let orgCache: OrgSnapshot | null = null;
 let orgInflight: Promise<OrgSnapshot | null> | null = null;
 
+/* A stale-but-not-yet-expired access token (e.g. signed by a rotated JWT
+   signing key) is rejected as 401 by PostgREST, and supabase-js will not
+   refresh a token it still considers valid — so the rejected token kept
+   being sent and every dashboard load logged
+   "organization_members ... 401". The signal differs across supabase-js
+   releases (HTTP status, PGRST301, or an auth-worded message), so accept
+   any of them before forcing exactly one refresh + retry. */
+function isUnauthorized(err: unknown): boolean {
+  const e = err as { status?: number; code?: string; message?: string } | null;
+  if (!e) return false;
+  if (e.status === 401) return true;
+  if (e.code === "PGRST301" || e.code === "401") return true;
+  return /jwt|unauthor|invalid api key/i.test(e.message ?? "");
+}
+
 export function getCachedOrgContext(): OrgSnapshot | null {
   return orgCache;
 }
@@ -66,10 +81,11 @@ export async function loadOrgContext(force = false): Promise<OrgSnapshot | null>
       const user = session?.user;
       if (!user) return null;
 
-      const { data, error: dbError } = await supabase
-        .from("organization_members")
-        .select(
-          `organization_id,
+      const runQuery = () =>
+        supabase
+          .from("organization_members")
+          .select(
+            `organization_id,
            status,
            organization:organizations(
              id, name, slug, business_type, base_currency_code, country_code,
@@ -77,10 +93,18 @@ export async function loadOrgContext(force = false): Promise<OrgSnapshot | null>
              registration_number, logo_url
            ),
            role:organization_roles(code)`
-        )
-        .eq("user_id", user.id)
-        .eq("status", "ACTIVE")
-        .order("created_at");
+          )
+          .eq("user_id", user.id)
+          .eq("status", "ACTIVE")
+          .order("created_at");
+
+      let result = await runQuery();
+      if (result.error && isUnauthorized(result.error)) {
+        const { data: refreshed } = await supabase.auth.refreshSession();
+        if (refreshed.session) result = await runQuery();
+      }
+      const data = result.data;
+      const dbError = result.error;
 
       if (dbError) throw dbError;
 

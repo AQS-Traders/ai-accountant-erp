@@ -8,6 +8,11 @@ import type { AgentProgress, ProgressStep } from "@/lib/types/api";
 
 const POLL_MS = 1500;
 
+/* Hard ceiling on polling. A stale conversation id (a run whose executor
+   was killed mid-flight) never reaches a terminal status, so an unbounded
+   poll would hammer the API for as long as the tab stayed open. */
+const POLL_DEADLINE_MS = 10 * 60 * 1000;
+
 const PHASE_LABELS: Record<string, string> = {
   RECEIVED: "Request received",
   INTERPRETING: "Understanding intent",
@@ -173,6 +178,7 @@ export default function AIProgress({
   useEffect(() => {
     if (!conversationId || liveSteps) return;
     let cancelled = false;
+    const deadline = Date.now() + POLL_DEADLINE_MS;
     let timer: ReturnType<typeof setTimeout>;
 
     const tick = async () => {
@@ -189,7 +195,8 @@ export default function AIProgress({
       } catch {
         // Backend briefly unreachable - stay calm and keep polling.
       }
-      if (!cancelled) timer = setTimeout(tick, POLL_MS);
+      // Give up once the ceiling is reached: nothing is coming.
+      if (!cancelled && Date.now() < deadline) timer = setTimeout(tick, POLL_MS);
     };
     tick();
     return () => {

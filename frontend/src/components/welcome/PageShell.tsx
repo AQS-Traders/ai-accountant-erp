@@ -17,12 +17,14 @@ const fraunces = Fraunces({
   style: ["normal", "italic"],
   variable: "--font-fraunces",
   display: "swap",
+  preload: false,
 });
 const cormorant = Cormorant_Garamond({
   subsets: ["latin"],
   style: ["normal", "italic"],
   variable: "--font-cormorant",
   display: "swap",
+  preload: false,
 });
 
 export const TABS = [
