@@ -502,6 +502,22 @@ def plan(
     # DISTINCT lines; the invoice total is DERIVED from them (Σ qty ×
     # price) so the header can never disagree with its own lines.
     line_items = _extract_line_items(msg)
+    # ATTACHED DOCUMENTS: the vision-extracted block already carries the
+    # authoritative line-item table and supplier.  Parse it so a multi-line
+    # GRN/bill becomes DISTINCT lines with a DERIVED total (its own rows)
+    # instead of collapsing into the first line's amount - and so a supplier
+    # named on the document is never replaced by table furniture such as
+    # "line items".
+    if not line_items:
+        doc_lines, doc_supplier = _extract_document_lines(msg)
+        if doc_lines:
+            line_items = doc_lines
+        if doc_supplier:
+            existing_party = str(
+                entities.get("supplier_name") or ""
+            ).strip().lower()
+            if not existing_party or existing_party in _JUNK_PARTY_NAMES:
+                entities["supplier_name"] = doc_supplier
     if line_items:
         entities["line_items"] = line_items
         entities["amount"] = _line_items_total(line_items)
@@ -1670,6 +1686,103 @@ def _extract_line_items(text: str) -> Optional[List[Dict[str, Any]]]:
     if len(lines) < 2:
         return None
     return lines
+
+
+# ---------------------------------------------------------------------------
+# ATTACHED-DOCUMENT LINE ITEMS (vision extraction block)
+# ---------------------------------------------------------------------------
+# A document upload reaches the planner as FACTUAL CONTEXT appended to the
+# message ("[Attached document information]") with an authoritative header
+# (Supplier / Subtotal / Discount / Total) and one row per line:
+#
+#     Line 1: Surf Excel 5 kg | qty 20 | unit 600.0 | amount 12600.0
+#
+# Without this parser the document collapsed to ONE line carrying whichever
+# amount the header patterns happened to match first (Line 1's amount), so a
+# 7-line GRN was recorded as a single-line bill for the first row and the
+# model had to reconcile the difference in a giant, timeout-prone round trip.
+# The printed line TOTAL is preferred over qty x unit_price because the
+# document's own rows are summed into its stated subtotal - deriving the unit
+# price from the line total keeps the recorded lines tied to the document
+# (parity law: the header can never disagree with its own lines).
+_DOC_LINE_RE = re.compile(
+    r"^[ \t]*line[ \t]*\d+[ \t]*:[ \t]*(?P<desc>.+?)"
+    r"(?:[ \t]*\|[ \t]*qty[ \t]*(?P<qty>[\d,]+(?:\.\d+)?))?"
+    r"(?:[ \t]*\|[ \t]*unit[ \t]*(?P<unit>[\d,]+(?:\.\d+)?))?"
+    r"(?:[ \t]*\|[ \t]*amount[ \t]*(?P<amount>[\d,]+(?:\.\d+)?))?"
+    r"[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DOC_SUPPLIER_RE = re.compile(
+    r"^[ \t]*supplier[ \t]*:[ \t]*(?P<name>.+?)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Column headings / table furniture can never be a party ledger name.
+_JUNK_PARTY_NAMES = {
+    "line", "lines", "line item", "line items", "item", "items",
+    "description", "qty", "quantity", "unit", "amount", "total",
+    "subtotal", "discount", "tax", "unit price", "price", "particulars",
+}
+
+
+def _doc_number(raw: Optional[str]) -> Optional[float]:
+    """Parse a document row/header number, tolerating separators."""
+    if not raw:
+        return None
+    try:
+        value = float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _extract_document_lines(
+    text: str,
+) -> tuple:
+    """Parse the ATTACHED-DOCUMENT block into DISTINCT lines + supplier.
+
+    Returns ``(line_items | None, supplier_name | None)``.  Line items are
+    ``{"description", "quantity", "unit_price"}`` - the same shape the
+    multi-item phrasing parser produces, so every downstream consumer
+    (fast paths, validation, the document services) is unchanged.  Nothing is
+    ever invented: a row is only kept when its quantity and total/unit price
+    parse into sane numbers.
+    """
+    if not text or "[Attached document information]" not in text:
+        return None, None
+    supplier = None
+    m = _DOC_SUPPLIER_RE.search(text)
+    if m:
+        name = (m.group("name") or "").strip(" .;'\"")
+        if name and name.lower() not in _JUNK_PARTY_NAMES:
+            supplier = name
+    lines: List[Dict[str, Any]] = []
+    for match in _DOC_LINE_RE.finditer(text):
+        desc = (match.group("desc") or "").strip(" -:|.")
+        # A description may still carry a trailing column fragment; keep only
+        # the leading human-readable part.
+        desc = re.split(r"\s*\|\s*", desc)[0].strip()
+        if len(desc) < 2:
+            continue
+        qty = _doc_number(match.group("qty"))
+        unit = _doc_number(match.group("unit"))
+        amount = _doc_number(match.group("amount"))
+        # Printed line total wins (derives a unit price that ties the line to
+        # the document); otherwise quantity x unit price.
+        if amount is not None and qty and qty > 0:
+            unit_price = round(amount / qty, 2)
+        elif qty and qty > 0 and unit is not None:
+            unit_price = round(unit, 2)
+        else:
+            continue
+        if qty is None or qty <= 0 or unit_price < 0:
+            continue
+        lines.append({
+            "description": desc,
+            "quantity": qty,
+            "unit_price": unit_price,
+        })
+    return (lines or None), supplier
 
 
 def _line_items_total(lines: List[Dict[str, Any]]) -> float:

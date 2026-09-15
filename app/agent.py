@@ -84,6 +84,37 @@ _CUSTOMER_PARTY_INTENTS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# SERVERLESS PROVIDER BUDGET (live defect: FUNCTION_INVOCATION_TIMEOUT)
+# ---------------------------------------------------------------------------
+# A provider round-trip retries internally (Qwen: 3 attempts, each bounded by
+# qwen_timeout_seconds=120s) and then falls back to Gemini.  A single stalled
+# planning/execution call could therefore consume 300s+ — past the host's
+# function limit.  The platform then killed the function mid-run: the session
+# stayed EXECUTING forever, no tool call was ever recorded, and the user saw a
+# bare timeout error with no way forward.  Every provider round-trip is now
+# bounded by an explicit wall-clock budget, so on expiry the run degrades to
+# an honest, resumable response instead of being killed.
+_LLM_PLANNING_BUDGET_SECONDS = 100.0
+_LLM_EXECUTION_BUDGET_SECONDS = 170.0
+
+
+async def _bounded_provider_call(coro, *, budget: float, stage: str):
+    """Await a provider call under a hard wall-clock budget.
+
+    Returns ``(result, None)`` on success or ``(None, reason)`` when the
+    budget expired.  The budget only ever triggers where the platform would
+    otherwise terminate the entire function.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=budget), None
+    except asyncio.TimeoutError:
+        return None, (
+            f"The AI provider stopped responding ({stage} took longer than "
+            f"{int(budget)}s)."
+        )
+
+
 async def _party_resolution_question(
     *,
     organization_id: uuid.UUID,
@@ -861,6 +892,39 @@ async def _deterministic_mutation_calls(
         "subtotal": float(amount),
         "total": float(amount),
     }
+    # R4.10 PARITY: when DISTINCT lines were resolved (multi-item phrasing or
+    # the attached-document table), the bill MUST carry them - the manual form
+    # records line items and a document bill without its lines loses the very
+    # detail the user uploaded.  The stated amount must equal the sum of the
+    # lines; any mismatch is never reconciled by guessing (the model path
+    # asks instead), and the service recomputes every line_total from
+    # quantity x unit_price, so the header can never disagree with its lines.
+    line_items = entities.get("line_items")
+    if line_items:
+        try:
+            bill_items = [
+                {
+                    "description": str(l.get("description") or "").strip(),
+                    "quantity": float(l.get("quantity")),
+                    "unit_price": float(l.get("unit_price")),
+                }
+                for l in line_items
+            ]
+        except (TypeError, ValueError):
+            bill_items = None
+        if bill_items and any(
+            not i["description"] or i["quantity"] <= 0 or i["unit_price"] < 0
+            for i in bill_items
+        ):
+            bill_items = None
+        if bill_items:
+            derived = round(
+                sum(i["quantity"] * i["unit_price"] for i in bill_items), 2
+            )
+            if abs(derived - float(amount)) <= 0.01:
+                params["items"] = bill_items
+                params["subtotal"] = derived
+                params["total"] = derived
     notes = entities.get("item_description") or (
         "Credit purchase recorded by the agent"
     )
@@ -1997,12 +2061,34 @@ async def execute(
             # phrasing) get a lighter output budget.
             light_budget = execution_plan.intent in _LIGHT_BUDGET_INTENTS
             _phase_elapsed("llm_call.start")
-            planning_result = await client.generate_with_tools(
-                user_message=user_message,
-                context=context,
-                light_budget=light_budget,
-                excluded_tools=excluded_tools or None,
+            planning_result, provider_stall = await _bounded_provider_call(
+                client.generate_with_tools(
+                    user_message=user_message,
+                    context=context,
+                    light_budget=light_budget,
+                    excluded_tools=excluded_tools or None,
+                ),
+                budget=_LLM_PLANNING_BUDGET_SECONDS,
+                stage="planning",
             )
+            if planning_result is None:
+                # Bounded failure instead of a platform kill: the session is
+                # closed honestly and the user can simply answer again — every
+                # fact already given is preserved in this conversation.
+                await _update_status(session_id, ExecutionStatus.FAILED)
+                await _log_step(session_id, "FAILED", {
+                    "reason": provider_stall,
+                    "stage": "planning",
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.FAILED,
+                    execution_id=session_id,
+                    summary=(
+                        f"{provider_stall} Nothing was recorded yet. "
+                        "Please send your request again — everything you have "
+                        "already told me is kept in this conversation."
+                    ),
+                )
             _phase_elapsed("llm_call.done")
             llm_text = planning_result.get("text", "")
             planned_tool_calls = planning_result.get("tool_calls", [])
@@ -2278,13 +2364,38 @@ async def execute(
                 ],
             }
         else:
-            final_result = await client.generate_with_tools(
-                user_message=user_message,
-                context=context,
-                executor=_executor,
-                excluded_tools=excluded_tools,
-                light_budget=light_budget,
+            final_result, provider_stall = await _bounded_provider_call(
+                client.generate_with_tools(
+                    user_message=user_message,
+                    context=context,
+                    executor=_executor,
+                    excluded_tools=excluded_tools,
+                    light_budget=light_budget,
+                ),
+                budget=_LLM_EXECUTION_BUDGET_SECONDS,
+                stage="execution",
             )
+            if final_result is None:
+                # The run is closed honestly instead of being killed by the
+                # host's function limit (which left the session stuck in
+                # EXECUTING with no result and no recorded tool calls).  The
+                # interruption is disclosed plainly: the tool loop may have
+                # been cut short, so the user is told to check before
+                # re-recording.
+                await _update_status(session_id, ExecutionStatus.FAILED)
+                await _log_step(session_id, "FAILED", {
+                    "reason": provider_stall,
+                    "stage": "execution",
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.FAILED,
+                    execution_id=session_id,
+                    summary=(
+                        f"{provider_stall} The run was stopped before it could "
+                        "finish, so please check the affected records before "
+                        "asking again — anything already saved stays saved."
+                    ),
+                )
         llm_text = final_result.get("text", "") or llm_text
         tool_calls: List[ToolCall] = final_result.get("tool_calls", [])
         tool_results: List[ToolResult] = final_result.get("tool_results", [])
