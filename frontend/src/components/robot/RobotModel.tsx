@@ -94,10 +94,13 @@ export function RobotModel({
   const podRingR = useRef<THREE.Mesh>(null);
   const badgeRing = useRef<THREE.Mesh>(null);
 
-  /* 1-second colour-cycle state: every second the coloured areas hop to
-     the next hue of the spectrum (see the cycler inside useFrame). */
+  /* FLUID multi-colour state: the master hue drifts CONTINUOUSLY and every
+     colour-cycled part carries its own phase, so several hues are on the
+     body at the same instant and the spectrum visibly flows through it
+     (see the cycler inside useFrame). */
   const hue = useRef(0.5);
-  const hueAcc = useRef(0);
+  const flow = useRef(0);
+  const target = useMemo(() => new THREE.Color(), []);
 
   /* Glowing "Ai" chest badge text — drawn once on an offscreen canvas
      (offline-safe: no font CDN, no texture downloads). */
@@ -128,20 +131,29 @@ export function RobotModel({
   useFrame((s, d) => {
     const t = s.clock.elapsedTime;
 
-    /* Multi-colour mode: each second, the teal accents, joints, eye glow
-       and ring glow all step to a new spectral hue — offset from one
-       another so the palette stays coordinated as it rotates. */
+    /* FLUID multi-colour mode. Instead of stepping the WHOLE robot to one
+       hue every second (which reads as a single colour blinking to the
+       next), the master hue now drifts continuously while every
+       colour-cycled part carries its OWN phase offset — so the body shows
+       several hues at once and the spectrum flows accents → joints → eye
+       glow → ring glow → tablet glow like a liquid gradient. Each material
+       EASES toward its target colour (lerp) so nothing ever snaps. */
     if (!reduced) {
-      hueAcc.current += d;
-      if (hueAcc.current >= 1) {
-        hueAcc.current %= 1;
-        hue.current = (hue.current + 0.09) % 1;
-        const h = hue.current;
-        m.teal.color.setHSL(h, 0.62, 0.34);
-        m.joint.color.setHSL((h + 0.07) % 1, 0.62, 0.26);
-        m.eye.emissive.setHSL(h, 0.9, 0.6);
-        m.ring.emissive.setHSL((h + 0.45) % 1, 0.9, 0.62);
-      }
+      hue.current = (hue.current + d * 0.045) % 1;
+      /* travelling-wave term: the phase spread between parts breathes, so
+         the gradient sweeps through the body instead of rotating rigidly */
+      flow.current = (flow.current + d * 0.13) % 1;
+      const w = Math.sin(flow.current * Math.PI * 2) * 0.5 + 0.5;
+      const paint = (mat: THREE.Color, h: number, s: number, l: number) => {
+        target.setHSL(h % 1, s, l);
+        mat.lerp(target, 0.09);
+      };
+      const h = hue.current;
+      paint(m.teal.color, h, 0.62, 0.34);                              // shell accents
+      paint(m.joint.color, h + 0.13 + w * 0.07, 0.58, 0.25);           // joints + hands
+      paint(m.eye.emissive, h + 0.35 + w * 0.12, 0.95, 0.62);          // eye glow
+      paint(m.ring.emissive, h + 0.58 + w * 0.18, 0.95, 0.62);         // pod + badge rings
+      paint(m.screen.emissive, h + 0.76 + w * 0.10, 0.55, 0.26);       // tablet glow
     }
     const breathe = reduced ? 0 : Math.sin(t * 2.3) * 0.05 + 0.05;
 

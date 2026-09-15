@@ -656,12 +656,23 @@ class RobotErrorBoundary extends Component<{ children: ReactNode }, { failed: bo
 function CameraRig({ variant }: { variant: Variant }) {
   const { camera } = useThree();
   useEffect(() => {
-    /* hero: closer + centred — the canvas now spans the FULL hero row, so
-       framing him larger keeps him prominent while his head and boots both
-       stay inside the frame at any height. compact pulls back + lifts the
-       framing for the auth-page corner. */
-    camera.position.set(0, variant === "hero" ? 1.5 : 1.18, variant === "hero" ? 5.8 : 4.75);
-    camera.lookAt(0, variant === "hero" ? 1.1 : 1.02, 0);
+    /* HERO — he must STAND ON the hero's bottom border, not hover above it.
+       The stage canvas is flush with the backdrop image (inset-y-0 on lg,
+       pulled down to the image's bottom edge below lg), so the camera is the
+       only thing that decides where his soles land on screen.
+
+       Ground-line maths (vertical fov 33° → half-angle 16.5°): a sole at
+       world y=0 sits atan(camY / camZ) below the horizon. With a LEVEL axis
+       (lookAt height == camera height) and camY = camZ·tan(16°), his soles
+       project at ~98.6% of the canvas height — boots touching the bottom
+       border with a ~1.4% safety margin, so walking toward the camera
+       (z→0.1, the walk/moonwalk depth) can never crop them. The same level
+       axis puts the top of his head (~y 2.02) at ~36% from the top, so the
+       whole figure stays in frame with the air now ABOVE him rather than
+       beneath his feet. compact pulls back + lifts the framing for the
+       auth-page corner. */
+    camera.position.set(0, variant === "hero" ? 1.58 : 1.18, variant === "hero" ? 5.5 : 4.75);
+    camera.lookAt(0, variant === "hero" ? 1.58 : 1.02, 0);
   }, [camera, variant]);
   return null;
 }
@@ -686,7 +697,7 @@ export default function HeroRobotStage({ variant = "hero" }: { variant?: Variant
         dpr={[1, 2]}
         performance={{ min: 0.5 }}
         gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-        camera={{ position: [0, 1.5, 5.8], fov: 33 }}
+        camera={{ position: [0, 1.58, 5.5], fov: 33 }}
         style={{ background: "transparent" }}
       >
         <CameraRig variant={variant} />
@@ -703,13 +714,16 @@ export default function HeroRobotStage({ variant = "hero" }: { variant?: Variant
             <RobotActor variant={variant} reduced={reduced} />
           </RobotErrorBoundary>
           {/* Robot only — no podium, no platform elements. A soft contact
-              shadow is all that grounds him on the page backdrop. */}
+              shadow is what grounds him on the backdrop's floor: now that
+              his soles sit ON the hero's bottom border, a slightly tighter
+              and darker shadow reads as real contact instead of a floating
+              figure with a faint smudge below. */}
           <ContactShadows
             position={[0, 0.001, 0]}
-            opacity={0.16}
-            scale={3.0}
-            blur={2.8}
-            far={1.8}
+            opacity={0.26}
+            scale={2.4}
+            blur={2.3}
+            far={1.6}
             color="#1e3a5f"
           />
         </Suspense>

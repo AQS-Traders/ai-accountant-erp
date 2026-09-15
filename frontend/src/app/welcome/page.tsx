@@ -10,7 +10,6 @@ import {
   FileBarChart, PencilLine, Mail, MessageCircle, ChevronRight,
   FileText, Send, Sparkles, Check,
   TrendingUp, TrendingDown,
-  Bot, Footprints, Music, Hand, RefreshCw,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
@@ -174,75 +173,14 @@ function HeroTagline() {
   );
 }
 
-/* ---- Ledger's command deck -------------------------------------
-   Premium click-to-run commands: every button dispatches a
-   `ledger-command` event; the robot's actor consumes it and
-   performs that exact routine on the spot. */
-const ROBOT_COMMANDS = [
-  { command: "robotdance", label: "The Robot", icon: Bot, chip: "from-indigo-500 to-violet-500" },
-  { command: "moonwalk", label: "Moonwalk", icon: Footprints, chip: "from-teal-500 to-emerald-500" },
-  { command: "conductor", label: "Conduct", icon: Music, chip: "from-amber-500 to-orange-500" },
-  { command: "kungfu", label: "Strike a Pose", icon: Zap, chip: "from-rose-500 to-pink-500" },
-  { command: "bow", label: "Take a Bow", icon: Hand, chip: "from-sky-500 to-cyan-500" },
-  { command: "cartwheel", label: "Cartwheel", icon: RefreshCw, chip: "from-violet-500 to-fuchsia-500" },
-  { command: "meditate", label: "Meditate", icon: Sparkles, chip: "from-emerald-500 to-teal-500" },
-] as const;
+/* ---- Ledger's routines -------------------------------------------
+   The hero used to carry an on-screen "Commands" launcher + deck of
+   click-to-run routines. That UI has been REMOVED from the hero, so the
+   stage stays clean: clicking Ledger himself (or letting the ambient loop
+   run) is how routines now happen. The robot actor still listens for the
+   `ledger-command` event, so any click-to-perform trigger keeps working. */
 
-function RobotCommandDeck() {
-  /* Commands are NOT pinned on screen — a single launcher summons the
-     deck on demand, so the hero stays clean until you want to play.
-     DESKTOP ONLY: on mobile the deck is fully removed — the launcher
-     button and the command chips never render below the md breakpoint. */
-  const [open, setOpen] = useState(false);
-  return (
-    <div
-      className="hidden md:block absolute bottom-[9%] right-4 z-30"
-      aria-label="Ledger commands"
-    >
-      {open && (
-        <div
-          className="mb-2 flex md:flex-col flex-wrap gap-2 max-w-[calc(100vw-2rem)] md:max-w-none"
-          style={{ animation: "heroRise 0.35s cubic-bezier(0.19,1,0.22,1) both" }}
-        >
-          <span className="hidden md:block text-[9px] font-bold uppercase tracking-[0.22em] text-brand-navy/60 pl-2">
-            Command Ledger
-          </span>
-          {ROBOT_COMMANDS.map((c) => (
-            <button
-              key={c.command}
-              type="button"
-              onClick={() =>
-                window.dispatchEvent(
-                  new CustomEvent("ledger-command", { detail: { command: c.command } }),
-                )
-              }
-              className="pointer-events-auto inline-flex items-center gap-2 rounded-full bg-white/85 backdrop-blur border border-white shadow-[0_10px_26px_-12px_rgba(27,42,74,0.4)] pl-1.5 pr-3.5 py-1.5 text-[11px] font-bold text-brand-navy transition-all hover:-translate-y-0.5 hover:bg-white hover:shadow-[0_14px_30px_-12px_rgba(27,42,74,0.5)] active:scale-95"
-            >
-              <span
-                className={`w-6 h-6 rounded-full bg-gradient-to-br ${c.chip} flex items-center justify-center shadow-sm shrink-0`}
-              >
-                <c.icon className="w-3 h-3 text-white" strokeWidth={2.5} />
-              </span>
-              {c.label}
-            </button>
-          ))}
-        </div>
-      )}
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-        aria-label={open ? "Hide robot commands" : "Show robot commands"}
-        className="inline-flex items-center gap-2 rounded-full bg-white/90 backdrop-blur border border-white shadow-[0_14px_30px_-12px_rgba(27,42,74,0.45)] pl-2 pr-4 py-2 text-[11px] font-bold text-brand-navy transition-all hover:-translate-y-0.5 hover:bg-white active:scale-95"
-      >
-        <span className="w-7 h-7 rounded-full bg-gradient-to-br from-teal-500 to-cyan-500 flex items-center justify-center shadow-sm shrink-0">
-          <Bot className="w-3.5 h-3.5 text-white" strokeWidth={2.5} />
-        </span>
-        {open ? "Hide Commands" : "Commands"}
-      </button>
-    </div>
-  );
-}
+
 
 
 
@@ -406,7 +344,6 @@ function FloatChip({
   sub,
   note,
   delay,
-  tilt,
   target,
 }: {
   icon: LucideIcon;
@@ -416,16 +353,18 @@ function FloatChip({
   sub: string;
   note?: string;
   delay: string;
-  tilt: string;
   target?: string;
 }) {
+  /* SAME GLASS LANGUAGE as the Business Overview card: glass-panel +
+     glass-soft, one radius, one fixed width and NO rotation. Previously
+     these chips were white cards with individual tilts, which made the
+     stage look scattered next to the glass cards. */
   return (
     <div
       data-ledger-target={target}
       className={cn(
-        "hero-float rounded-[1.5rem] bg-white/90 backdrop-blur border border-white/80",
-        "shadow-[0_24px_50px_-20px_rgba(27,42,74,0.35)] px-4 py-3.5 flex items-center gap-3",
-        tilt,
+        "hero-float glass-panel glass-soft rounded-2xl w-56",
+        "shadow-xl px-4 py-3.5 flex items-center gap-3",
       )}
       style={{ animation: `floaty 6s ease-in-out ${delay} infinite` }}
     >
@@ -874,14 +813,16 @@ export default function WelcomePage() {
 
             {/* RIGHT / FRONT — Ledger's stage. Below lg it flows under the
                 copy; on lg+ it becomes an absolute overlay spanning the FULL
-                hero-section height (top edge to bottom edge), so his canvas
-                bottom sits exactly on the backdrop image's bottom border —
-                a much bigger stage, and he can never be cropped by its
-                edges (camera + roam bounds guarantee it). DELIBERATELY no
-                entrance animation: Ledger is a native part of the hero —
-                he is simply there from the first frame, on every load. */}
+                hero-section height (top edge to bottom edge). His canvas
+                bottom therefore sits exactly on the backdrop image's bottom
+                border on lg+, and the `-mb-24` below lg cancels the copy
+                column's pb-24 so the canvas bottom lands on the image's
+                bottom border there too — Ledger's boots meet the floor line
+                instead of hovering above it in every layout. DELIBERATELY no
+                entrance animation: Ledger is a native part of the hero — he
+                is simply there from the first frame, on every load. */}
             <div
-              className="relative h-[420px] sm:h-[500px] md:h-[540px] -mx-3 sm:mx-0 lg:absolute lg:z-20 lg:inset-y-0 lg:mx-0 lg:h-auto lg:left-1/2 lg:w-[50vw]"
+              className="relative h-[420px] sm:h-[500px] md:h-[540px] -mb-24 lg:mb-0 -mx-3 sm:mx-0 lg:absolute lg:z-20 lg:inset-y-0 lg:mx-0 lg:h-auto lg:left-1/2 lg:w-[50vw]"
               onPointerDown={(e) => {
                 /* Mouse control: click Ledger directly (the canvas) and he
                    responds with an engaging routine. Clicks on cards/deck
@@ -897,14 +838,15 @@ export default function WelcomePage() {
                 <HeroRobotStage variant="hero" />
               </div>
 
-              {/* Command deck — click any command and Ledger performs it */}
-              <RobotCommandDeck />
+              {/* NOTE: the old "Commands" launcher + deck lived here. It was
+                  removed from the hero — the stage stays clean; click
+                  Ledger himself to see his routines. */}
 
               {/* MOBILE — same cards as the desktop stage, but laid BEHIND
                   Ledger starting at his SHOULDERS and extending up past his
                   head (canvas z-10 paints the robot over them). */}
               <div className="md:hidden absolute inset-x-2 bottom-[36%] z-0 grid grid-cols-2 gap-3 pointer-events-none">
-                <div className="rounded-3xl bg-white/90 backdrop-blur border border-white/80 shadow-[0_18px_38px_-18px_rgba(27,42,74,0.3)] px-3.5 py-3 -rotate-1">
+                <div className="glass-panel glass-soft rounded-2xl shadow-xl px-3.5 py-3">
                   <span className="w-9 h-9 rounded-2xl bg-gradient-to-br from-emerald-100 to-emerald-50 clay-chip flex items-center justify-center mb-2">
                     <FileText className="w-4 h-4 text-emerald-600" />
                   </span>
@@ -913,7 +855,7 @@ export default function WelcomePage() {
                     <Check className="w-2.5 h-2.5" strokeWidth={3} /> Created · INV-2025-001
                   </span>
                 </div>
-                <div className="rounded-3xl bg-white/90 backdrop-blur border border-white/80 shadow-[0_18px_38px_-18px_rgba(27,42,74,0.3)] px-3.5 py-3 rotate-1">
+                <div className="glass-panel glass-soft rounded-2xl shadow-xl px-3.5 py-3">
                   <span className="w-9 h-9 rounded-2xl bg-gradient-to-br from-indigo-100 to-indigo-50 clay-chip flex items-center justify-center mb-2">
                     <BookOpen className="w-4 h-4 text-indigo-600" />
                   </span>
@@ -922,7 +864,7 @@ export default function WelcomePage() {
                     <Check className="w-2.5 h-2.5" strokeWidth={3} /> Recorded · 2 Lines
                   </span>
                 </div>
-                <div className="rounded-3xl bg-white/90 backdrop-blur border border-white/80 shadow-[0_18px_38px_-18px_rgba(27,42,74,0.3)] px-3.5 py-3 rotate-1">
+                <div className="glass-panel glass-soft rounded-2xl shadow-xl px-3.5 py-3">
                   <span className="w-9 h-9 rounded-2xl bg-gradient-to-br from-sky-100 to-sky-50 clay-chip flex items-center justify-center mb-2">
                     <BarChart3 className="w-4 h-4 text-sky-600" />
                   </span>
@@ -931,7 +873,7 @@ export default function WelcomePage() {
                     <Check className="w-2.5 h-2.5" strokeWidth={3} /> Updated · As of today
                   </span>
                 </div>
-                <div className="rounded-3xl bg-white/90 backdrop-blur border border-white/80 shadow-[0_18px_38px_-18px_rgba(27,42,74,0.3)] px-3.5 py-3 -rotate-1">
+                <div className="glass-panel glass-soft rounded-2xl shadow-xl px-3.5 py-3">
                   <span className="w-9 h-9 rounded-2xl bg-gradient-to-br from-violet-100 to-violet-50 clay-chip flex items-center justify-center mb-2">
                     <Sparkles className="w-4 h-4 text-violet-600" />
                   </span>
@@ -951,7 +893,6 @@ export default function WelcomePage() {
                   sub="Created Successfully"
                   note="INV-2025-001"
                   delay="0s"
-                  tilt="-rotate-2"
                   target="invoice"
                 />
                 <FloatChip
@@ -962,7 +903,6 @@ export default function WelcomePage() {
                   sub="Recorded"
                   note="2 Lines Posted"
                   delay="1.1s"
-                  tilt="rotate-1"
                   target="journal"
                 />
                 <FloatChip
@@ -973,7 +913,6 @@ export default function WelcomePage() {
                   sub="Updated"
                   note="As of today"
                   delay="2.2s"
-                  tilt="rotate-2"
                   target="trial"
                 />
               </div>

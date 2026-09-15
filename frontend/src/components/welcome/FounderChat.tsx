@@ -14,6 +14,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Bot, Send, Sparkles, X } from "lucide-react";
+import { ChatCircleDots } from "@phosphor-icons/react";
 
 type Msg = { role: "user" | "assistant"; text: string };
 
@@ -255,18 +256,24 @@ export default function FounderChat() {
           }}
           aria-label={open ? "Close assistant" : "Open assistant — ask any question about AI Accountant"}
           aria-expanded={open}
-          className="chat-launcher-core relative w-14 h-14 rounded-full bg-gradient-to-br from-teal-500 to-cyan-600 text-white flex items-center justify-center shadow-xl shadow-teal-500/40 transition-all hover:-translate-y-1 hover:shadow-2xl active:scale-95"
+          className="chat-launcher-core relative w-16 h-16 sm:w-[70px] sm:h-[70px] rounded-full bg-gradient-to-br from-teal-500 via-cyan-500 to-indigo-500 p-[3px] shadow-2xl shadow-teal-500/45 transition-all hover:-translate-y-1 active:scale-95"
           style={{ animation: "chatBob 3.4s ease-in-out infinite" }}
         >
-          {open ? (
-            <X className="w-6 h-6" />
-          ) : (
-            <>
-              <Bot className="w-7 h-7" strokeWidth={2.2} />
-              <span className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-white shadow-md flex items-center justify-center">
-                <Sparkles className="w-3 h-3 text-teal-600" strokeWidth={2.5} />
-              </span>
-            </>
+          {/* Premium Phosphor glyph on a bright core: the icon is BIGGER
+              (36px vs the old 28px) and genuinely COLOURED — a two-tone
+              teal duotone inside a vivid teal→cyan→indigo ring, with a
+              warm amber sparkle accent — instead of a plain white outline. */}
+          <span className="w-full h-full rounded-full bg-white flex items-center justify-center">
+            {open ? (
+              <X className="w-8 h-8 text-brand-navy" strokeWidth={2.4} />
+            ) : (
+              <ChatCircleDots className="w-9 h-9 text-teal-600" weight="duotone" aria-hidden="true" />
+            )}
+          </span>
+          {!open && (
+            <span className="absolute -top-0.5 -right-0.5 w-6 h-6 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 shadow-md flex items-center justify-center ring-2 ring-white">
+              <Sparkles className="w-3.5 h-3.5 text-white" strokeWidth={2.5} />
+            </span>
           )}
         </button>
       </div>
