@@ -1445,6 +1445,24 @@ def _merge_clarification_answers(
                 merged["catalog_skip"] = True
             continue
 
+        # REVENUE-LEDGER round ("Revenue ledger check: ..."): reviews whether the
+        # stream that was sold deserves its OWN revenue ledger.  YES creates a
+        # dedicated child ledger under the revenue parent; any other answer names
+        # the existing revenue account to use instead.  Either way the decision is
+        # the user's — a sale is never silently booked to an arbitrary revenue
+        # account (the defect that credited a mobile-phone sale to "Software
+        # Development Revenue").
+        if "revenue ledger check:" in question:
+            low = answer.lower()
+            if low.startswith(("yes", "create", "ok", "y")):
+                merged["revenue_ledger_decision"] = "CREATE"
+            else:
+                merged["revenue_ledger_decision"] = "USE_EXISTING"
+                named = answer.strip()
+                if named:
+                    merged["revenue_account_name"] = named
+            continue
+
         # Work Stream R4.9/R4.10 — invoice LINE-DETAIL answers: the
         # description and quantity are asked in the consolidated round
         # and routed here.  A multi-item answer ("2 laptops at 5000 and

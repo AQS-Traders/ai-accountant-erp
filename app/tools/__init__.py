@@ -226,11 +226,37 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
     # because that account sorted first in a software house's chart.
     from app.services import revenue_ledger_service
 
-    revenue, stream, revenue_source = (
-        await revenue_ledger_service.resolve_revenue_account(
-            organization_id, description
+    # A REVIEWED account is authoritative: the user approved a dedicated stream
+    # ledger (or named an existing one), so use exactly that account.  Only when
+    # nothing was reviewed does the service resolve one deliberately.
+    revenue = None
+    revenue_source = "reviewed"
+    stream = revenue_ledger_service.stream_label(description)
+    override_id = kw.get("revenue_account_id")
+    if override_id:
+        rows = await account_repo.get_chart_of_accounts(
+            organization_id, account_type="REVENUE", limit=200
         )
-    )
+        revenue = next(
+            (r for r in (rows or []) if str(r.get("id")) == str(override_id)),
+            None,
+        )
+        if revenue is None:
+            return ToolResult(
+                tool_name="record_cash_sale",
+                success=False,
+                error=(
+                    "The reviewed revenue account is not present in this "
+                    "organisation's chart of accounts. Ask the user which "
+                    "revenue account to use."
+                ),
+            )
+    else:
+        revenue, stream, revenue_source = (
+            await revenue_ledger_service.resolve_revenue_account(
+                organization_id, description
+            )
+        )
     if revenue is None:
         if stream:
             ask = (

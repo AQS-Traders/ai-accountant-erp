@@ -540,6 +540,12 @@ def _cash_sale_fast_path_call(
             or "Cash sale"
         ),
     }
+    # A revenue account the user has REVIEWED and approved (dedicated stream
+    # ledger, or an existing account they named).  Passed straight through so the
+    # tool credits exactly that ledger instead of choosing one.
+    reviewed_account = entities.get("revenue_account_id")
+    if reviewed_account:
+        params["revenue_account_id"] = str(reviewed_account)
     return [ToolCall(tool_name="record_cash_sale", arguments=params)]
 
 
@@ -1112,6 +1118,79 @@ async def _close_superseded_sessions(
             kept_session=str(keep_session_id),
         )
     return superseded
+
+
+# Sale intents whose revenue account must be REVIEWED before execution.
+_SALE_REVIEW_INTENTS = frozenset({
+    "record_cash_sale",
+    "record_sale",
+    "record_credit_sale",
+    "create_invoice",
+})
+
+
+async def _revenue_ledger_review_gate(
+    *,
+    organization_id: uuid.UUID,
+    execution_plan,
+):
+    """Ask BEFORE a sale picks a revenue account — and create on approval.
+
+    Returns a clarification payload when the USER must decide, otherwise None.
+
+    When the user has already answered, the decision is APPLIED here: on
+    approval the dedicated child ledger is created under the revenue parent, and
+    the resolved account id is written into the plan's entities so the executing
+    tool credits exactly that account.
+
+    This is the flexible-COA behaviour: the chart grows to match how the business
+    actually earns (Chairs, Beds, Mobile Phones ...) instead of every sale being
+    squeezed into whichever revenue account happens to exist.  It never guesses
+    — an unresolved revenue account blocks the sale with a question.
+    """
+    intent = str(getattr(execution_plan, "intent", "") or "")
+    if intent not in _SALE_REVIEW_INTENTS:
+        return None
+    entities = getattr(execution_plan, "extracted_entities", None)
+    if not isinstance(entities, dict):
+        return None
+
+    from app.services import revenue_ledger_service as rls
+
+    item = entities.get("item_description") or entities.get("description")
+    decision = entities.get("revenue_ledger_decision")
+    label = rls.stream_label(item)
+
+    if decision:
+        # The user has spoken — apply it (creating the ledger when approved).
+        account, created = await rls.apply_decision(
+            organization_id, label, decision
+        )
+        if account is not None:
+            entities["revenue_account_id"] = str(account["id"])
+            entities["revenue_account_resolved"] = (
+                "created" if created else "existing"
+            )
+        return None
+
+    if not await rls.needs_review(organization_id, item, decision):
+        return None
+
+    proposed = rls.suggest_ledger_name(label) if label else "a new ledger"
+    parent = await rls.find_parent_revenue(organization_id)
+    parent_name = (parent or {}).get("name") or "Revenue"
+    return {
+        "question": (
+            f"Revenue ledger check: nothing is recorded against '{label}' yet. "
+            f"Create a dedicated ledger '{proposed}' under '{parent_name}' so "
+            f"this revenue is reported separately? Reply YES to create it, or "
+            f"reply with the name of an existing revenue account to use instead."
+        ),
+        "options": [
+            {"value": "yes", "label": f"Create '{proposed}' under {parent_name}"},
+            {"value": "no", "label": f"Use the existing '{parent_name}' account"},
+        ],
+    }
 
 
 _PHASE_STATUS_MAP: Dict[ExecutionStatus, tuple] = {
@@ -2125,6 +2204,32 @@ async def execute(
                 requires_user_input=True,
             )
         _phase_elapsed("catalog_question.done", asked=bool(catalog_question))
+
+        # ---- PHASE 3c: SALE REVENUE-LEDGER REVIEW (flexible COA) ----------
+        # A sale must never be booked to an arbitrary revenue account.  When the
+        # item sold names a stream with no dedicated ledger, ASK — and create the
+        # ledger on approval — BEFORE any execution.  Never assumes.
+        review = await _revenue_ledger_review_gate(
+            organization_id=organization_id,
+            execution_plan=execution_plan,
+        )
+        if review is not None:
+            await _update_status(
+                session_id, ExecutionStatus.AWAITING_CLARIFICATION
+            )
+            await _log_step(session_id, "AWAITING_CLARIFICATION", {
+                "source": "revenue_ledger",
+                "question": review["question"][:300],
+            })
+            return AgentResponse(
+                status=ExecutionStatus.AWAITING_CLARIFICATION,
+                execution_id=session_id,
+                question=review["question"],
+                options=review.get("options"),
+                required_information=["revenue_ledger_decision"],
+                requires_user_input=True,
+            )
+
         deterministic_calls = await _deterministic_mutation_calls(
             organization_id=organization_id,
             execution_plan=execution_plan,
