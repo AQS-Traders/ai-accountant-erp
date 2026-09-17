@@ -257,19 +257,25 @@ def _resolve_secret_candidates(raw_secret: str) -> List[bytes]:
 async def _resolve_membership(
     user_id: uuid.UUID,
 ) -> Optional[Dict[str, Any]]:
-    """Find the first active organization membership for the user."""
+    """Find the user's ACTIVE organization membership.
+
+    SECURITY: the query is filtered on ``status = 'ACTIVE'`` and there is
+    deliberately NO fallback to unfiltered rows.  The previous fallback ran a
+    status-agnostic lookup whenever no ACTIVE membership was found, which
+    authenticated SUSPENDED and REMOVED members and then handed them a full
+    AuthContext for that organization.  Deactivating a user must revoke
+    access, so "no ACTIVE membership" now means "not a member".
+
+    Ordered by ``created_at`` for determinism: a user who belongs to several
+    organizations always resolves to the same (oldest) membership instead of
+    an arbitrary row whose identity depended on the planner's row order.
+    """
     members = await fetch_many(
         "organization_members",
         filters={"user_id": str(user_id), "status": "ACTIVE"},
+        order="created_at.asc",
         limit=1,
     )
-    if not members:
-        # Try without status filter
-        members = await fetch_many(
-            "organization_members",
-            filters={"user_id": str(user_id)},
-            limit=1,
-        )
     return members[0] if members else None
 
 
@@ -302,6 +308,44 @@ def _dev_header_auth_enabled() -> bool:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+async def build_auth_context_for_user(user_id: uuid.UUID) -> AuthContext:
+    """Resolve a FRESH AuthContext for a background execution.
+
+    Used by the AI worker, which runs outside any HTTP request: there is no
+    bearer token to verify, so the identity was established when the job was
+    enqueued.  What must NOT be inherited is the AUTHORIZATION — the
+    membership, its status and the user's role may all have changed since
+    enqueue time, and a queued job can sit in the queue for a long time.
+
+    This re-reads membership, status and role from the database, so:
+      * a user whose membership was suspended or removed loses access;
+      * a role downgrade takes effect on the next job;
+      * the organization comes from the membership, never from the payload.
+
+    Raises ``HTTPException(403)`` when the user has no ACTIVE membership.
+    """
+    membership = await _resolve_membership(user_id)
+    if not membership:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is not an active member of any organization",
+        )
+
+    role_code = ""
+    role_permissions: List[str] = []
+    if membership.get("role_id"):
+        role = await _resolve_role(membership["role_id"])
+        role_code = role.get("code", "")
+        role_permissions = role.get("permissions", [])
+
+    return AuthContext(
+        user_id=user_id,
+        organization_id=uuid.UUID(str(membership["organization_id"])),
+        role_code=role_code,
+        role_permissions=role_permissions,
+    )
+
 
 async def authenticate(
     authorization: Optional[str] = None,
