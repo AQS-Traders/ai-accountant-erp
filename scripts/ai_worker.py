@@ -15,8 +15,12 @@ or /api/ai/progress?conversation_id=... (the run records its steps exactly
 like a synchronous run, because it IS the same pipeline).
 
 Authorisation model: enqueueing requires a valid JWT (enforced by the
-API). The worker executes with service privileges - it NEVER accepts jobs
-that did not come from an authenticated user.
+API), so the job's user identity is trustworthy.  The AUTHORIZATION is NOT
+inherited from enqueue time: the worker reconstructs a fresh AuthContext
+(membership + status + role) before every execution, because a job can sit
+in the queue while the user is suspended, removed or downgraded.  A job
+whose organization no longer matches the user's active membership is
+refused rather than executed in the wrong tenant.
 """
 import asyncio
 import sys
@@ -64,47 +68,68 @@ async def process_one(client) -> bool:
     log.info("worker.claimed", job_id=job_id, worker=WORKER_ID)
 
     try:
+        # SECURITY: reconstruct AUTHORIZATION at execution time.  The identity
+        # was verified when the job was enqueued, but membership, its status
+        # and the user's role may all have changed since.  Role, permissions
+        # and organization are read from the database — never from the job
+        # payload.  This also makes the permission check in tool_router run:
+        # it used to be skipped entirely because auth was None.
+        from app.auth import build_auth_context_for_user
+
+        auth_ctx = await build_auth_context_for_user(uuid.UUID(job["user_id"]))
+        job_org = uuid.UUID(job["organization_id"])
+        if auth_ctx.organization_id != job_org:
+            # The queue row disagrees with the user's live membership. Refuse
+            # rather than execute a financial mutation in the wrong tenant.
+            raise PermissionError(
+                "Job organization does not match the user's active membership"
+            )
+
         agent_response = await execute(
             user_message=payload.get("message", ""),
-            user_id=uuid.UUID(job["user_id"]),
-            organization_id=uuid.UUID(job["organization_id"]),
-            auth=None,  # already authenticated at enqueue time (API gate)
+            user_id=auth_ctx.user_id,
+            organization_id=auth_ctx.organization_id,
+            auth=auth_ctx,
             conversation_id=payload.get("conversation_id"),
             attachments=[
                 AttachmentRef(**a) for a in (payload.get("attachments") or [])
             ],
         )
-        (
-            client.schema("ai")
-            .table("worker_jobs")
-            .update(
+        # Completion goes through an ownership-checked, cancellation-aware RPC.
+        # The old code updated `worker_jobs` by id alone, so a worker whose
+        # lease had already lapsed could overwrite the result another worker
+        # produced.  finish_worker_job() also applies retry backoff and
+        # terminalises the job once attempts are exhausted.
+        try:
+            client.schema("ai").rpc(
+                "finish_worker_job",
                 {
-                    "status": "SUCCEEDED",
-                    "result": agent_response.model_dump(mode="json"),
-                    "error": None,
-                    "lease_expires_at": None,
-                }
-            )
-            .eq("id", job_id)
-            .execute()
-        )
+                    "p_job_id": job_id,
+                    "p_worker": WORKER_ID,
+                    "p_status": "SUCCEEDED",
+                    "p_result": agent_response.model_dump(mode="json"),
+                    "p_error": None,
+                },
+            ).execute()
+        except Exception as finish_exc:  # noqa: BLE001 - lease lost; recorded below
+            log.error("worker.finish_failed", job_id=job_id, error=str(finish_exc))
         log.info("worker.completed", job_id=job_id,
                  status=agent_response.status.value)
     except Exception as exc:  # noqa: BLE001 - job failure is recorded, not raised
         log.error("worker.failed", job_id=job_id, error=str(exc))
-        (
-            client.schema("ai")
-            .table("worker_jobs")
-            .update(
+        try:
+            client.schema("ai").rpc(
+                "finish_worker_job",
                 {
-                    "status": "FAILED",
-                    "error": str(exc)[:2000],
-                    "lease_expires_at": None,
-                }
-            )
-            .eq("id", job_id)
-            .execute()
-        )
+                    "p_job_id": job_id,
+                    "p_worker": WORKER_ID,
+                    "p_status": "FAILED",
+                    "p_result": None,
+                    "p_error": str(exc)[:2000],
+                },
+            ).execute()
+        except Exception as finish_exc:  # noqa: BLE001 - lease lost
+            log.error("worker.finish_failed", job_id=job_id, error=str(finish_exc))
     return True
 
 
