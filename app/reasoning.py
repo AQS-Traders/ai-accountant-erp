@@ -1342,19 +1342,43 @@ def analyze_requirements(
                     question=nature_question_for_intent(intent) or NATURE_DECISION_QUESTION,
                 ))
         # Line detail capture: a named item needs quantity + unit price in
-        # the SAME consolidated round — a bare amount is not enough.
+        # the SAME consolidated round — a bare amount is not enough.  Only
+        # the genuinely MISSING half is asked for: when the quantity was
+        # stated in the request ("selling 2 ovens"), asking for it again was
+        # the reported bug.  Both wordings keep the words "quantity" and
+        # "price" so the answer-merge heuristic (_merge_clarification_answers
+        # matches on those keywords) still routes the reply correctly.
         if item and (
             entities.get("item_quantity") is None
             or entities.get("item_unit_price") is None
         ):
+            has_qty = entities.get("item_quantity") is not None
+            has_price = entities.get("item_unit_price") is not None
+            if not has_qty and not has_price:
+                detail = f"'{item}' named without complete line detail"
+                question = (
+                    f"What quantity and unit price apply to '{item}'? "
+                    "(include the discount or tax rate too, if any)"
+                )
+            elif not has_price:
+                detail = f"'{item}' named without a unit price"
+                question = (
+                    f"Unit price for '{item}'? (quantity "
+                    f"{entities.get('item_quantity'):g} already noted — just "
+                    "give the price, plus any discount or tax rate)"
+                )
+            else:
+                detail = f"'{item}' named without a quantity"
+                question = (
+                    f"What quantity of '{item}'? (unit price "
+                    f"{entities.get('item_unit_price'):g} already noted — "
+                    "include any discount or tax rate)"
+                )
             nodes.append(DependencyNode(
                 key="item_line_details", dimension="Line detail",
                 state=FieldResolutionState.MISSING_AND_REQUIRED,
-                detail=f"'{item}' named without complete line detail",
-                question=(
-                    f"What quantity and unit price apply to '{item}'? "
-                    "(include the discount or tax rate too, if any)"
-                ),
+                detail=detail,
+                question=question,
             ))
 
     # --- 4d. TRANSACTION NATURE (Work Stream R - purpose-first) --------------
