@@ -29,6 +29,7 @@ Capability mapping (from ai.permissions):
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
@@ -39,20 +40,43 @@ from app.database import fetch_many
 
 log = structlog.get_logger(__name__)
 
-# Cached permission data (refreshed on first call per process)
+# Cached permission data, refreshed after _PERMISSIONS_CACHE_TTL_SECONDS.
+# A process-lifetime cache meant a permission change (or a role edit) never
+# took effect until the process restarted — and the AI worker never restarts,
+# so it kept honouring a stale snapshot forever.
 _permissions_cache: Optional[List[Dict[str, Any]]] = None
+_permissions_cache_at: float = 0.0
+_PERMISSIONS_CACHE_TTL_SECONDS = 60.0
 
 
 async def _load_permissions() -> List[Dict[str, Any]]:
-    """Load all active permissions from ai.permissions."""
-    global _permissions_cache
-    if _permissions_cache is not None:
+    """Load active permissions from ai.permissions, cached for a short TTL."""
+    global _permissions_cache, _permissions_cache_at
+    now = time.monotonic()
+    if (
+        _permissions_cache is not None
+        and (now - _permissions_cache_at) < _PERMISSIONS_CACHE_TTL_SECONDS
+    ):
         return _permissions_cache
-    _permissions_cache = await fetch_many(
-        "ai_permissions",
-        filters={"status": "ACTIVE"},
-        limit=100,
-    )
+
+    try:
+        rows = await fetch_many(
+            "ai_permissions",
+            filters={"status": "ACTIVE"},
+            limit=100,
+        )
+    except Exception:  # noqa: BLE001 - must not poison the cache permanently
+        # A transient read failure (provider blip, cold start) previously
+        # became a permanent failure once the value was cached.  Keep serving
+        # the last good snapshot and retry after the TTL instead.
+        if _permissions_cache is not None:
+            log.warning("permissions.refresh_failed_serving_last_known")
+            _permissions_cache_at = now
+            return _permissions_cache
+        raise
+
+    _permissions_cache = rows
+    _permissions_cache_at = now
     return _permissions_cache
 
 
@@ -201,5 +225,6 @@ async def authorize_tool(
 
 def invalidate_cache():
     """Clear the cached permissions (call after permission changes)."""
-    global _permissions_cache
+    global _permissions_cache, _permissions_cache_at
     _permissions_cache = None
+    _permissions_cache_at = 0.0
