@@ -1,4 +1,4 @@
-import type { AgentResponse, UserRequest, ClarificationAnswer, ConfirmationDecision, SessionSummary, AgentProgress } from "@/lib/types/api";
+import type { AgentResponse, UserRequest, ClarificationAnswer, ConfirmationDecision, SessionSummary, AgentProgress, OnboardingSchema, OnboardingAnalysis, OnboardingAnswer } from "@/lib/types/api";
 
 // Same-origin by default: on Vercel the FastAPI backend is served under
 // /api/* of the same domain (see vercel.json "services"). For local dev set
@@ -296,6 +296,36 @@ export async function aiExecuteStream(
     throw new Error("The AI stream ended without a result. Try again.");
   }
   return state.final;
+}
+
+/* ---- Organization onboarding (AI-assisted first-time setup) ---- */
+
+/**
+ * Real backend-compatible onboarding choices: business types with the chart
+ * each one produces, supported currencies, required fields and the optional
+ * account bundles. Read from the backend contract, never hard-coded, so the
+ * UI cannot offer a choice the backend rejects.
+ */
+export async function onboardingSchema(businessType?: string): Promise<OnboardingSchema> {
+  const query = businessType ? `?business_type=${encodeURIComponent(businessType)}` : "";
+  return fetchApi<OnboardingSchema>(`/api/onboarding/schema${query}`);
+}
+
+/**
+ * Ask the assistant to turn a plain-language business description into an
+ * onboarding PROPOSAL. Nothing is created: the result is reviewed (and
+ * edited) by the user before the organization is created.
+ */
+export async function aiAnalyzeOrganization(payload: {
+  description: string;
+  business_type?: string | null;
+  answers?: OnboardingAnswer[];
+  history?: { role: "user" | "assistant"; content: string }[];
+}): Promise<OnboardingAnalysis> {
+  return fetchApi<OnboardingAnalysis>("/api/onboarding/analyze", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 /* ---- Health ---- */

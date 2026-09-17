@@ -125,7 +125,7 @@ export default function Sidebar() {
       ) : (
         <>
           <Image
-            src="/ai-accountant.png"
+            src="/ai-accountant-logo.svg"
             alt="AI Accountant"
             width={220}
             height={62}

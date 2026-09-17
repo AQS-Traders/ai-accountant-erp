@@ -400,6 +400,20 @@ async def verify_journal(
 # ===================================================================
 
 
+async def _grouping_account_ids(organization_id: uuid.UUID) -> set:
+    """Parent (grouping) account ids for an organization.
+
+    Used so a hierarchy heading can never be resolved as a posting default.
+    A lookup failure degrades to "no grouping accounts", which keeps the
+    previous behaviour rather than blocking the posting.
+    """
+    try:
+        return await a_repo.get_grouping_account_ids(organization_id)
+    except Exception as exc:  # noqa: BLE001 — never block a posting on this
+        log.warning("accounting_engine.grouping_lookup_failed", error=str(exc)[:200])
+        return set()
+
+
 async def _resolve_default_account(
     organization_id: uuid.UUID,
     account_type: str,
@@ -416,10 +430,20 @@ async def _resolve_default_account(
     of silently posting to a wrong expense category.  Other types (cash,
     payable, revenue) keep the first-of-type convention — conventional
     control accounts, low mis-classification risk.
+
+    GROUPING accounts are never postable: since the chart of accounts is
+    hierarchical, a parent (e.g. "Property, Plant & Equipment") is a
+    heading, not an account that can carry a posting.  Any account that is
+    the parent of another active account is skipped, so introducing
+    hierarchy can never hijack a default.
     """
     accounts = await a_repo.get_chart_of_accounts(
         organization_id, account_type=account_type, limit=100,
     )
+    if accounts:
+        group_ids = await _grouping_account_ids(organization_id)
+        accounts = [a for a in accounts if a.get("id") not in group_ids]
+
     if account_type == "EXPENSE":
         generic_terms = ("general", "other", "miscellaneous", "sundry", "operating")
         for acc in accounts:
@@ -440,7 +464,10 @@ async def _resolve_default_account(
             organization_id, account_type=fallback_type, limit=5,
         )
         if fallback:
-            return fallback[0]
+            group_ids = await _grouping_account_ids(organization_id)
+            for acc in fallback:
+                if acc.get("id") not in group_ids:
+                    return acc
     return None
 
 

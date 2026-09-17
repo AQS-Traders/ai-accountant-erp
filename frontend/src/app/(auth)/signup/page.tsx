@@ -137,7 +137,7 @@ export default function SignupPage() {
       <div className="text-center">
         <div className="flex justify-center mb-5 logo-enter">
           <Image
-            src="/ai-accountant.png"
+            src="/ai-accountant-logo.svg"
             alt="AI Accountant"
             width={260}
             height={74}

@@ -92,6 +92,18 @@ class AuthContext:
     role_permissions: List[str] = field(default_factory=list)
 
 
+@dataclass
+class UserContext:
+    """Authenticated user WITHOUT organization resolution.
+
+    Used by the endpoints that run BEFORE an organization exists — the
+    first-time onboarding assistant analyses and populates organization
+    fields while the user still has no membership, so it must not require
+    the membership/role lookup :func:`authenticate` performs.
+    """
+    user_id: uuid.UUID
+
+
 # ---------------------------------------------------------------------------
 # JWKS
 # ---------------------------------------------------------------------------
@@ -323,6 +335,51 @@ async def authenticate(
         role_code=role_code,
         role_permissions=role_permissions,
     )
+
+
+async def authenticate_user(
+    authorization: Optional[str] = None,
+    x_user_id: Optional[str] = None,
+) -> UserContext:
+    """Authenticate a request WITHOUT resolving an organization.
+
+    Identical token verification to :func:`authenticate` (ES256 via JWKS,
+    legacy HS256 fallback, dev header fallback), but it deliberately does
+    not look up — or require — an organization membership.  First-time
+    onboarding happens before the user belongs to any organization.
+    """
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]  # Strip "Bearer "
+        payload = _decode_jwt(token)
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status_code=401, detail="Invalid token: missing subject")
+        try:
+            return UserContext(user_id=uuid.UUID(sub))
+        except ValueError:
+            raise HTTPException(status_code=401, detail="Invalid token: malformed user ID")
+
+    # Legacy development header fallback (no organization required).
+    if x_user_id:
+        try:
+            return UserContext(user_id=uuid.UUID(x_user_id))
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=401, detail="Invalid user ID")
+
+    raise HTTPException(
+        status_code=401,
+        detail="Authentication required: provide Bearer token or X-User-Id header",
+    )
+
+
+async def authenticate_user_header(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    x_user_id: Optional[str] = Header(None, alias="X-User-Id"),
+) -> UserContext:
+    """FastAPI dependency for endpoints that must work before an
+    organization exists (organization onboarding).  Provides user identity
+    only."""
+    return await authenticate_user(authorization=authorization, x_user_id=x_user_id)
 
 
 async def authenticate_header(

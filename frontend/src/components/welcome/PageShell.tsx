@@ -78,7 +78,7 @@ export default function PageShell({
         <div className="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between">
           <Link href="/welcome" className="flex items-center">
             <Image
-              src="/ai-accountant.png"
+              src="/ai-accountant-logo.svg"
               alt="AI Accountant"
               width={220}
               height={60}

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -28,7 +29,12 @@ from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request, stat
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.auth import AuthContext, authenticate_header
+from app.auth import (
+    AuthContext,
+    UserContext,
+    authenticate_header,
+    authenticate_user_header,
+)
 from app.config import get_settings
 from app.database import fetch_many, fetch_one, insert_one, set_session_phase
 from app.models.schemas import (
@@ -723,6 +729,113 @@ async def get_session(
         "clarifications": clarifications,
         "confirmations": confirmations,
     }
+
+
+# ---------------------------------------------------------------------------
+# ORGANIZATION ONBOARDING — AI-assisted first-time setup
+# ---------------------------------------------------------------------------
+# This runs BEFORE the user belongs to any organization (that is the whole
+# point of it), so it authenticates the USER only — never an organization
+# membership, which does not exist yet for a first-time signup.
+#
+# Nothing here writes anything.  The description is analysed against the
+# LIVE backend contract (field names, defaults, validation rules, business
+# types, currencies and account bundles, all read from the database at
+# runtime) and the result is returned as a PROPOSAL the user reviews and
+# edits.  Creating the organization still goes through the existing
+# create_organization + apply_organization_onboarding RPCs, called from the
+# browser with the user's own JWT — so RLS, role checks and the audit trail
+# are exactly as they were.
+_ONBOARDING_RL: Dict[str, deque] = defaultdict(deque)
+_ONBOARDING_RL_MAX = 20
+_ONBOARDING_RL_WINDOW = 300.0
+
+
+@app.get("/api/onboarding/schema")
+async def onboarding_schema(
+    business_type: Optional[str] = None,
+    auth: UserContext = Depends(authenticate_user_header),
+):
+    """Real backend-compatible onboarding options.
+
+    Business types (with the chart of accounts each one produces), the
+    supported currencies, the required fields and the optional account
+    bundles — read from the database contract, never hard-coded, so the
+    onboarding UI cannot offer a choice the backend rejects.  Passing
+    ``business_type`` also returns the catalog for that business type (the
+    accounts the organization will actually get).
+    """
+    from app.onboarding_analysis import (
+        build_schema_payload,
+        load_catalog,
+        load_contract,
+    )
+
+    contract = await load_contract()
+    catalog = await load_catalog(business_type) if business_type else None
+    log.info(
+        "api.onboarding_schema",
+        user_id=str(auth.user_id),
+        business_type=business_type,
+        contract_available=bool(contract),
+    )
+    return build_schema_payload(contract, catalog, business_type)
+
+
+@app.post("/api/onboarding/analyze")
+async def onboarding_analyze(
+    payload: Dict[str, Any] = Body(default={}),
+    auth: UserContext = Depends(authenticate_user_header),
+):
+    """Turn a plain-language business description into an onboarding proposal.
+
+    Body:
+      description   — the owner's own words (required on the first call)
+      business_type — the value already selected in the form, as a hint
+      answers       — [{"field": ..., "answer": ...}] clarifications already given
+      history       — [{"role": ..., "content": ...}] question/answer transcript
+
+    The response reports what was understood, what was NOT stated (so it is
+    never invented), the questions that must still be answered, and the
+    account bundles that apply — each with its reason.  It never creates or
+    finalises an organization.
+    """
+    key = str(auth.user_id)
+    now = time.monotonic()
+    bucket = _ONBOARDING_RL[key]
+    while bucket and now - bucket[0] > _ONBOARDING_RL_WINDOW:
+        bucket.popleft()
+    if len(bucket) >= _ONBOARDING_RL_MAX:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many onboarding analyses — please wait a moment and try again.",
+        )
+    bucket.append(now)
+
+    description = str(payload.get("description") or "")
+    if len(description) > 4000:
+        description = description[:4000]
+    business_type = payload.get("business_type")
+    business_type = str(business_type).strip().upper() if business_type else None
+    answers = payload.get("answers") if isinstance(payload.get("answers"), list) else []
+    history = payload.get("history") if isinstance(payload.get("history"), list) else []
+
+    from app.onboarding_analysis import analyze_organization
+
+    log.info(
+        "api.onboarding_analyze",
+        user_id=key,
+        description_len=len(description),
+        business_type_hint=business_type,
+        answers=len(answers),
+    )
+
+    return await analyze_organization(
+        description=description,
+        business_type=business_type,
+        answers=answers,
+        history=history,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,98 @@ export interface ConfirmationDecision {
   notes?: string;
 }
 
+/* ---- Organization onboarding (AI-assisted first-time setup) ---- */
+
+export interface OnboardingBusinessType {
+  value: string;
+  template_code: string;
+  template_name: string | null;
+  base_account_count: number | null;
+  optional_group_count: number | null;
+}
+
+export interface OnboardingCurrency {
+  code: string;
+  name: string;
+  symbol: string | null;
+  decimal_places: number | null;
+}
+
+export interface OnboardingAccount {
+  code: string;
+  name: string;
+  account_type: string;
+  category?: string | null;
+  parent_code?: string | null;
+  description?: string | null;
+}
+
+export interface OnboardingBundle {
+  code: string;
+  label: string;
+  description?: string | null;
+  /** Pre-recommended by the product for the chosen business type. */
+  recommended?: boolean;
+  /** Pre-ticked in the review step (recommended, or proposed by the AI). */
+  selected?: boolean;
+  reason?: string | null;
+  account_count?: number | null;
+  accounts?: OnboardingAccount[];
+}
+
+export interface OnboardingQuestion {
+  id: string;
+  field: string;
+  question: string;
+  why?: string | null;
+  options?: { value: string; label: string }[];
+  /** "assistant" | "backend_requirement" */
+  source?: string;
+}
+
+export interface OnboardingSchema {
+  available: boolean;
+  required_fields: string[];
+  defaults: Record<string, string | null>;
+  fiscal_year_end_month: { min: number; max: number };
+  business_types: OnboardingBusinessType[];
+  currencies: OnboardingCurrency[];
+  account_bundles: { code: string; label: string; description?: string | null }[];
+  bundles_by_business_type: Record<string, { code: string; recommended: boolean }[]>;
+  validation_rules: string[];
+  countries: { code: string; timezone: string; currency: string }[];
+  business_type?: string | null;
+  catalog?: {
+    business_type: string;
+    template: { code: string; name: string; description?: string | null };
+    base_accounts: OnboardingAccount[];
+    optional_groups: OnboardingBundle[];
+  };
+}
+
+export interface OnboardingAnalysis {
+  status: "ok" | "needs_information" | "unavailable";
+  used_ai: boolean;
+  reason?: string | null;
+  summary: string;
+  /** Only real backend field names ever appear here. */
+  fields: Record<string, string | number | null>;
+  /** How each value was obtained (inferred / backend_default / ...). */
+  field_sources: Record<string, string>;
+  field_notes: Record<string, string>;
+  /** Fields the assistant did NOT populate — shown as "not stated". */
+  unresolved: string[];
+  questions: OnboardingQuestion[];
+  account_groups: OnboardingBundle[];
+  rejected: { field: string; reason: string }[];
+  analysis: Record<string, unknown>;
+}
+
+export interface OnboardingAnswer {
+  field: string;
+  answer: string;
+}
+
 /* ---- Responses ---- */
 
 export interface AgentResponse {

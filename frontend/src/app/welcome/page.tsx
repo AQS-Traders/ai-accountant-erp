@@ -96,7 +96,15 @@ function LinkedInIcon({ className }: { className?: string }) {
    so they read as the brand's voice. Dwell times scale with length
    (~75ms/char) so a long sentence is comfortably readable before it
    crossfades. Rotation pauses under prefers-reduced-motion (the first
-   line then remains). */
+   line then remains).
+
+   The colour itself lives in ONE place: the `--hero-headline-gradient`
+   token in globals.css (deep navy → teal → cyan, every stop >= 5:1 on
+   white), shared with the `.text-aurora` accent on the inner page heros
+   and painted by `.hero-tagline-rotate` together with a white halo. That
+   keeps the headline prominent through entering, exiting, morphing and
+   fading — including over the bright hero photograph — while staying
+   inside the existing brand palette. */
 const HERO_TAGLINES = [
   { text: "No Accountant? No Problem. Run Your Books Yourself.", dur: 5400 },
   { text: "Built for Founders Who Don't Speak Accounting.", dur: 4600 },
@@ -104,10 +112,6 @@ const HERO_TAGLINES = [
   { text: "The AI-Native ERP That Replaces the Need for an Accountant.", dur: 5800 },
   { text: "Just Type What Happened. Our AI Does the Accounting.", dur: 5100 },
 ] as const;
-
-/* Brand gradient shared by every tagline variant */
-const TAGLINE_GRADIENT =
-  "linear-gradient(100deg, #0f766e 0%, #0891b2 55%, #06b6d4 100%)";
 
 function HeroTagline() {
   const [idx, setIdx] = useState(0);
@@ -158,16 +162,11 @@ function HeroTagline() {
         <span
           key={`out-${prevIdx}`}
           className="hero-tagline-rotate hero-tagline-out"
-          style={{ backgroundImage: TAGLINE_GRADIENT }}
         >
           {HERO_TAGLINES[prevIdx].text}
         </span>
       )}
-      <span
-        key={idx}
-        className="hero-tagline-rotate"
-        style={{ backgroundImage: TAGLINE_GRADIENT }}
-      >
+      <span key={idx} className="hero-tagline-rotate">
         {t.text}
       </span>
     </span>
@@ -614,7 +613,7 @@ export default function WelcomePage() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between">
           <Link href="/" className="flex items-center">
             <Image
-              src="/ai-accountant.png"
+              src="/ai-accountant-logo.svg"
               alt="AI Accountant"
               width={220}
               height={60}
@@ -1252,7 +1251,7 @@ export default function WelcomePage() {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
             <Image
-              src="/ai-accountant.png"
+              src="/ai-accountant-logo.svg"
               alt="AI Accountant"
               width={100}
               height={28}

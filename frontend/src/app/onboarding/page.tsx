@@ -1,11 +1,18 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils/cn";
 import Image from "next/image";
-import { Building2, Settings2, Coins, FileCheck, Check, Landmark, Upload, X } from "lucide-react";
+import {
+  Building2, Settings2, Coins, FileCheck, Check, Landmark, Upload, X, Sparkles, Wand2,
+} from "lucide-react";
+import AIOrganizationWizard, {
+  type OnboardingApplyPayload,
+} from "@/components/onboarding/AIOrganizationWizard";
+import { onboardingSchema } from "@/lib/api/client";
+import type { OnboardingSchema } from "@/lib/types/api";
 
 const BUSINESS_TYPES = [
   { value: "SOFTWARE_HOUSE", label: "Software House" },
@@ -74,10 +81,33 @@ const INITIAL: FormState = {
 
 /* ---- Small field primitives ---- */
 
-function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
+function AiChip() {
+  return (
+    <span className="inline-flex items-center gap-1 ml-1.5 px-1.5 py-0.5 rounded-full bg-ai-100 text-ai-700 text-[10px] font-medium align-middle">
+      <Sparkles className="w-2.5 h-2.5" />
+      AI
+    </span>
+  );
+}
+
+function Field({
+  label,
+  children,
+  hint,
+  aiFilled,
+}: {
+  label: string;
+  children: React.ReactNode;
+  hint?: string;
+  /** Marks a value the assistant proposed (still fully editable). */
+  aiFilled?: boolean;
+}) {
   return (
     <label className="block">
-      <span className="text-xs font-medium text-text-secondary">{label}</span>
+      <span className="text-xs font-medium text-text-secondary">
+        {label}
+        {aiFilled && <AiChip />}
+      </span>
       <div className="mt-1.5">{children}</div>
       {hint && <span className="text-[11px] text-text-muted mt-1 block">{hint}</span>}
     </label>
@@ -96,6 +126,49 @@ export default function OnboardingPage() {
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
+
+  /* ---- AI-assisted setup -------------------------------------------------
+     The assistant fills this same form, so the user still reviews and edits
+     every field.  Two things it also decides are kept separately because the
+     form has no field for them: the account bundles to create, and the
+     analysis to store as the onboarding record. */
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [aiFields, setAiFields] = useState<string[]>([]);
+  const [aiSources, setAiSources] = useState<Record<string, string>>({});
+  const [aiSummary, setAiSummary] = useState<string | null>(null);
+  const [aiGroups, setAiGroups] = useState<string[] | null>(null);
+  const [aiGroupLabels, setAiGroupLabels] = useState<{ code: string; label: string }[]>([]);
+  const [aiResponses, setAiResponses] = useState<Record<string, unknown> | null>(null);
+
+  /* Real backend-compatible choices (business types with the chart each one
+     produces, currencies).  Falls back to the built-in list when the API is
+     unreachable, so onboarding never dead-ends. */
+  const [schema, setSchema] = useState<OnboardingSchema | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    onboardingSchema()
+      .then((result) => {
+        if (!cancelled && result.available) setSchema(result);
+      })
+      .catch(() => {
+        /* keep the built-in fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const businessTypeOptions = useMemo(() => {
+    if (!schema?.business_types?.length) return BUSINESS_TYPES;
+    return schema.business_types.map((t) => ({
+      value: t.value,
+      label:
+        BUSINESS_TYPES.find((f) => f.value === t.value)?.label ??
+        t.template_name ??
+        t.value.replace(/_/g, " "),
+    }));
+  }, [schema]);
 
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setForm((f) => ({ ...f, [key]: value }));
@@ -131,6 +204,26 @@ export default function OnboardingPage() {
       });
       if (rpcError) throw rpcError;
       if (!data) throw new Error("Organization creation returned no id");
+      const organizationId = data as string;
+
+      // Apply the reviewed onboarding decisions: the account bundles the user
+      // approved (or, when the assistant was never used, NULL = the bundles
+      // recommended for this business type) plus the analysis record.  This
+      // is a no-op for the chart when no optional bundle is selected.
+      try {
+        const { error: onboardingError } = await supabase.rpc("apply_organization_onboarding", {
+          p_organization_id: organizationId,
+          p_groups: aiGroups,
+          p_responses: aiResponses,
+        });
+        if (onboardingError) {
+          // The organization exists with its base chart either way; never
+          // block the user on the optional account bundles.
+          console.warn("Optional account bundles were not applied:", onboardingError.message);
+        }
+      } catch (e) {
+        console.warn("Optional account bundles were not applied", e);
+      }
 
       // Persist prefix preferences on the created org's settings row.
       await supabase
@@ -141,17 +234,17 @@ export default function OnboardingPage() {
           bill_prefix: form.bill_prefix.trim() || "BIL",
           journal_prefix: form.journal_prefix.trim() || "JV",
         })
-        .eq("organization_id", data as string);
+        .eq("organization_id", organizationId);
 
       // Upload logo if selected
       if (logoFile) {
         try {
           const ext = logoFile.name.split(".").pop() || "png";
-          const path = `${data}/${Date.now()}.${ext}`;
+          const path = `${organizationId}/${Date.now()}.${ext}`;
           const { error: uploadErr } = await supabase.storage.from("org-logos").upload(path, logoFile);
           if (!uploadErr) {
             const { data: urlData } = supabase.storage.from("org-logos").getPublicUrl(path);
-            await supabase.from("organizations").update({ logo_url: urlData.publicUrl }).eq("id", data as string);
+            await supabase.from("organizations").update({ logo_url: urlData.publicUrl }).eq("id", organizationId);
           }
         } catch {
           // Logo upload is optional, continue anyway
@@ -167,8 +260,73 @@ export default function OnboardingPage() {
     }
   };
 
+  /* Merge the reviewed proposal into THIS form.  Only fields the backend
+     accepts are ever written, and every one of them stays editable. */
+  const applyAiProposal = useCallback(
+    (payload: OnboardingApplyPayload) => {
+      const { fields } = payload;
+      const numbers = ["fiscal_year_end_month", "fiscal_year_start_year"];
+      const texts = [
+        "name",
+        "business_type",
+        "legal_name",
+        "tax_number",
+        "registration_number",
+        "core_services",
+        "industry_details",
+        "base_currency_code",
+        "country_code",
+        "timezone",
+      ];
+
+      setForm((current) => {
+        const next = { ...current };
+        for (const field of texts) {
+          const value = fields[field];
+          if (typeof value === "string" && value.trim()) {
+            next[field as "name"] = value.trim() as never;
+          }
+        }
+        for (const field of numbers) {
+          const value = fields[field];
+          if (value !== undefined && value !== null && value !== "") {
+            next[field as "fiscal_year_end_month"] = Number(value) as never;
+          }
+        }
+        return next;
+      });
+
+      setAiFields(Object.keys(fields));
+      setAiSources((payload.responses.field_sources as Record<string, string>) ?? {});
+      setAiSummary((payload.responses.summary as string) ?? null);
+      setAiGroups(payload.groups);
+      setAiResponses(payload.responses);
+      const groups = (payload.responses.account_groups as { code: string; label?: string }[]) ?? [];
+      setAiGroupLabels(groups.map((g) => ({ code: g.code, label: g.label ?? g.code })));
+      setStep(0);
+    },
+    [],
+  );
+
+  const aiFilledCount = aiFields.length;
+
   const businessTypeLabel =
-    BUSINESS_TYPES.find((t) => t.value === form.business_type)?.label ?? form.business_type;
+    businessTypeOptions.find((t) => t.value === form.business_type)?.label ?? form.business_type;
+
+  const showAiBadge = (field: string) => aiFields.includes(field);
+
+  /* Where the assistant got each value from, for the final review list. */
+  const sourceLabel = (field: string): string | null => {
+    const source = aiSources[field];
+    if (!source) return null;
+    return (
+      {
+        inferred: "from your description",
+        backend_default: "backend default — change it if it is wrong",
+        inferred_from_stated_country: "from the country you mentioned",
+      }[source] ?? "set by the assistant"
+    );
+  };
 
   return (
     <div className="flex-1 flex flex-col items-center px-4 py-10">
@@ -183,6 +341,43 @@ export default function OnboardingPage() {
             This creates your chart of accounts, financial year and document
             numbering - everything needed to start bookkeeping.
           </p>
+        </div>
+
+        {/* AI-assisted setup — a first-class entry point, not a hidden option.
+            The assistant fills this same form; the user still reviews and
+            confirms every value before anything is created. */}
+        <div className="relative mb-6 rounded-2xl p-[1.5px] bg-gradient-to-r from-ai-500 via-brand-teal to-brand-navy shadow-lg shadow-ai-500/10">
+          <div className="rounded-[calc(1rem-1.5px)] bg-bg-surface px-5 py-4">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-text-primary flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-ai-600" />
+                  Create Organization with AI
+                </p>
+                <p className="text-xs text-text-secondary mt-1 leading-relaxed">
+                  Describe your business in your own words — what you sell, how you sell it,
+                  whether you hold stock or own machinery. The assistant fills in this setup
+                  and proposes the accounts your business actually needs. You review and
+                  adjust everything before it is created.
+                </p>
+                {aiFilledCount > 0 && (
+                  <p className="text-[11px] text-ai-700 mt-1.5 flex items-center flex-wrap">
+                    The assistant filled {aiFilledCount} field
+                    {aiFilledCount === 1 ? "" : "s"} below — each is marked
+                    <AiChip /> and you can change any of them.
+                  </p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => setWizardOpen(true)}
+                className="shrink-0 px-4 py-2.5 btn-3d btn-shine rounded-xl bg-ai-500 hover:bg-ai-600 text-white text-sm font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                <Wand2 className="w-4 h-4" />
+                {aiFilledCount > 0 ? "Describe it again" : "Start with AI"}
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Stepper */}
@@ -230,7 +425,11 @@ export default function OnboardingPage() {
         <div className="clay bg-bg-surface rounded-2xl p-6 space-y-5">
           {step === 0 && (
             <>
-              <Field label="Organization name *" hint={`Your workspace slug will be: ${slugPreview || "…"}`}>
+              <Field
+                label="Organization name *"
+                hint={`Your workspace slug will be: ${slugPreview || "…"}`}
+                aiFilled={showAiBadge("name")}
+              >
                 <input
                   className={inputCls}
                   value={form.name}
@@ -239,20 +438,29 @@ export default function OnboardingPage() {
                   autoFocus
                 />
               </Field>
-              <Field label="Business type">
+              <Field
+                label="Business type"
+                aiFilled={showAiBadge("business_type")}
+                hint={
+                  schema
+                    ? "This decides which chart of accounts your organization is created with."
+                    : undefined
+                }
+              >
                 <select
                   className={inputCls}
                   value={form.business_type}
                   onChange={(e) => set("business_type", e.target.value)}
                 >
-                  {BUSINESS_TYPES.map((t) => (
+                  {businessTypeOptions.map((t) => (
                     <option key={t.value} value={t.value}>{t.label}</option>
                   ))}
                 </select>
               </Field>
               <p className="text-xs text-text-muted">
                 We&apos;ll seed your chart of accounts from the template matching
-                this business type.
+                this business type — a software house, a trading business and a
+                factory each get the accounts their work actually needs.
               </p>
               <div>
                 <span className="text-xs font-medium text-text-secondary">Logo (optional)</span>
@@ -299,7 +507,11 @@ export default function OnboardingPage() {
 
           {step === 1 && (
             <>
-              <Field label="Legal name" hint="Registered company name, if different">
+              <Field
+                label="Legal name"
+                hint="Registered company name, if different"
+                aiFilled={showAiBadge("legal_name")}
+              >
                 <input
                   className={inputCls}
                   value={form.legal_name}
@@ -308,14 +520,14 @@ export default function OnboardingPage() {
                 />
               </Field>
               <div className="grid grid-cols-2 gap-4">
-                <Field label="Tax number (NTN)">
+                <Field label="Tax number (NTN)" aiFilled={showAiBadge("tax_number")}>
                   <input
                     className={inputCls}
                     value={form.tax_number}
                     onChange={(e) => set("tax_number", e.target.value)}
                   />
                 </Field>
-                <Field label="Registration number">
+                <Field label="Registration number" aiFilled={showAiBadge("registration_number")}>
                   <input
                     className={inputCls}
                     value={form.registration_number}
@@ -323,7 +535,7 @@ export default function OnboardingPage() {
                   />
                 </Field>
               </div>
-              <Field label="Core services">
+              <Field label="Core services" aiFilled={showAiBadge("core_services")}>
                 <textarea
                   className={cn(inputCls, "min-h-20 resize-y")}
                   value={form.core_services}
@@ -331,7 +543,7 @@ export default function OnboardingPage() {
                   placeholder="What does your business sell or provide?"
                 />
               </Field>
-              <Field label="Industry details">
+              <Field label="Industry details" aiFilled={showAiBadge("industry_details")}>
                 <input
                   className={inputCls}
                   value={form.industry_details}
@@ -345,7 +557,7 @@ export default function OnboardingPage() {
           {step === 2 && (
             <>
               <div className="grid grid-cols-2 gap-4">
-                <Field label="Base currency">
+                <Field label="Base currency" aiFilled={showAiBadge("base_currency_code")}>
                   <select
                     className={inputCls}
                     value={form.base_currency_code}
@@ -354,7 +566,7 @@ export default function OnboardingPage() {
                     {CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </Field>
-                <Field label="Country code">
+                <Field label="Country code" aiFilled={showAiBadge("country_code")}>
                   <input
                     className={inputCls}
                     maxLength={2}
@@ -363,7 +575,7 @@ export default function OnboardingPage() {
                   />
                 </Field>
               </div>
-              <Field label="Timezone">
+              <Field label="Timezone" aiFilled={showAiBadge("timezone")}>
                 <select
                   className={inputCls}
                   value={form.timezone}
@@ -376,6 +588,7 @@ export default function OnboardingPage() {
               </Field>
               <Field
                 label="Fiscal year ends in"
+                aiFilled={showAiBadge("fiscal_year_end_month")}
               >
                 <select
                   className={inputCls}
@@ -390,6 +603,7 @@ export default function OnboardingPage() {
               <Field
                 label="Starting from year"
                 hint={`FY runs ${MONTHS[(form.fiscal_year_end_month % 12)]} ${form.fiscal_year_start_year} \u2013 ${MONTHS[form.fiscal_year_end_month - 1]} ${form.fiscal_year_start_year + 1}`}
+                aiFilled={showAiBadge("fiscal_year_start_year")}
               >
                 <select
                   className={inputCls}
@@ -434,21 +648,67 @@ export default function OnboardingPage() {
           {step === 4 && (
             <div className="space-y-3">
               <h3 className="text-sm font-semibold text-text-primary">Review</h3>
+
+              {/* What the assistant understood, and what it deliberately left
+                  alone.  Nothing here is created until the user confirms. */}
+              {aiSummary && (
+                <div className="rounded-xl border border-ai-100 bg-ai-50/60 p-3 space-y-2">
+                  <p className="text-xs font-medium text-ai-700 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    From your description
+                  </p>
+                  <p className="text-xs text-ai-700 leading-relaxed">{aiSummary}</p>
+                  {aiFields.length > 0 && (
+                    <p className="text-[11px] text-ai-700/90">
+                      Marked <AiChip /> fields below came from what you told the assistant.
+                      Check each one — you can change any of them on the earlier steps.
+                    </p>
+                  )}
+                  {aiGroupLabels.length > 0 && (
+                    <div>
+                      <p className="text-[11px] font-medium text-ai-700">
+                        Accounts to be created beyond the base chart:
+                      </p>
+                      <ul className="mt-1 space-y-0.5">
+                        {aiGroupLabels.map((g) => (
+                          <li key={g.code} className="text-[11px] text-ai-700/90">
+                            • {g.label}
+                          </li>
+                        ))}
+                      </ul>
+                      <button
+                        type="button"
+                        onClick={() => setWizardOpen(true)}
+                        className="mt-1 text-[11px] text-ai-700 underline hover:text-ai-600"
+                      >
+                        Change the accounts… (reopen the assistant to amend them)
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
               <dl className="grid grid-cols-2 gap-x-6 gap-y-2.5 text-sm">
-                {[
-                  ["Name", form.name],
-                  ["Business type", businessTypeLabel],
-                  ["Legal name", form.legal_name || "-"],
-                  ["Tax number", form.tax_number || "-"],
-                  ["Currency", form.base_currency_code],
-                  ["Country", form.country_code],
-                  ["Timezone", form.timezone],
-                  ["Fiscal year", `${MONTHS[(form.fiscal_year_end_month % 12)]} ${form.fiscal_year_start_year} - ${MONTHS[form.fiscal_year_end_month - 1]} ${form.fiscal_year_start_year + 1}`],
-                  ["Prefixes", `${form.invoice_prefix} · ${form.quotation_prefix} · ${form.bill_prefix} · ${form.journal_prefix}`],
-                ].map(([label, value]) => (
+                {([
+                  ["Name", form.name, "name"],
+                  ["Business type", businessTypeLabel, "business_type"],
+                  ["Legal name", form.legal_name || "-", "legal_name"],
+                  ["Tax number", form.tax_number || "-", "tax_number"],
+                  ["Currency", form.base_currency_code, "base_currency_code"],
+                  ["Country", form.country_code, "country_code"],
+                  ["Timezone", form.timezone, "timezone"],
+                  [
+                    "Fiscal year",
+                    `${MONTHS[(form.fiscal_year_end_month % 12)]} ${form.fiscal_year_start_year} - ${MONTHS[form.fiscal_year_end_month - 1]} ${form.fiscal_year_start_year + 1}`,
+                    "fiscal_year_end_month",
+                  ],
+                  ["Prefixes", `${form.invoice_prefix} · ${form.quotation_prefix} · ${form.bill_prefix} · ${form.journal_prefix}`, ""],
+                ] as [string, string, string][]).map(([label, value, field]) => (
                   <div key={label} className="flex flex-col">
                     <dt className="text-[11px] uppercase tracking-wide text-text-muted">{label}</dt>
                     <dd className="text-text-primary font-medium truncate">{value}</dd>
+                    {field && sourceLabel(field) && (
+                      <dd className="text-[10px] text-ai-600">{sourceLabel(field)}</dd>
+                    )}
                   </div>
                 ))}
               </dl>
@@ -497,6 +757,16 @@ export default function OnboardingPage() {
             )}
           </div>
         </div>
+
+        {/* The AI setup assistant.  It only ever fills this same form (plus
+            the reviewed account bundles) — creating the organization remains
+            the explicit "Create organization" action above. */}
+        <AIOrganizationWizard
+          open={wizardOpen}
+          onClose={() => setWizardOpen(false)}
+          businessType={form.business_type}
+          onApply={applyAiProposal}
+        />
       </div>
     </div>
   );

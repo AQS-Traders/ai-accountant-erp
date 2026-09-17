@@ -753,27 +753,34 @@ body {
   50% { background-position: 100% 50%; }
 }
 
-/* Rotating hero tagline (6 palettes, swapped in JS every ~3s).
-   Each variant paints its own 600–700-tone gradient — always
-   strongly darker than the light aurora background, so the
-   headline stays prominently readable in every colour. Sits one
-   level below `.reveal-line > span` so the masked reveal and the
-   swap never fight over the animation property.
-
-   The swap itself is a TRUE crossfade — never an instant cut:
-   both lines share one inline-grid cell; the outgoing line blurs
-   upward and dissolves while the incoming line settles from a
-   soft blur-rise. Long easing curves + gentle distances keep it
-   smooth, sophisticated and creamy. */
+/* Rotating hero tagline — the landing headline.
+   The sentence is painted with the shared HEADLINE INK ramp (deep navy →
+   teal → cyan, every stop >= 5:1 on white) instead of the old ramp whose
+   light-cyan end measured ~2.4:1 over the hero photograph.  The swap is a
+   true crossfade: both lines share one inline-grid cell; the outgoing line
+   blurs upward and dissolves while the incoming line settles from a soft
+   blur-rise, and both keep the halo below so the copy stays legible over
+   every part of the hero backdrop (bright office photo, white veils, the
+   3D robot stage), not merely over one static colour. */
 .hero-tagline-stack {
   display: inline-grid;
   justify-items: start;
+  /* A soft white halo behind the glyphs.  It is invisible against the
+     headline's own white veil and lifts the glyphs wherever the backdrop
+     is busier or darker, which is what keeps the contrast stable across
+     the whole hero rather than on one average background colour.
+     Deliberately tight (1px crisp + 6px glow): the headline lives inside
+     the `.reveal-line` mask, whose overflow clipping would visibly cut a
+     wider glow at the top and bottom edges. */
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.8))
+    drop-shadow(0 0 6px rgba(255, 255, 255, 0.55));
 }
 .hero-tagline-stack > .hero-tagline-rotate {
   grid-area: 1 / 1;
 }
 .hero-tagline-rotate {
   display: inline-block;
+  background-image: var(--hero-headline-gradient);
   background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
@@ -965,6 +972,44 @@ body {
   transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* ============================================================
+   HEADLINE INK — the premium, high-contrast brand ramp
+   ------------------------------------------------------------
+   Every animated hero heading (the rotating landing headline and the
+   `.text-aurora` accent used inside page hero headings) paints from this
+   ONE ramp, so the brand voice is consistent and the copy stays readable
+   in every animation state.
+
+   The previous ramp ended at #22d3ee / #06b6d4 (very light cyan).  Measured
+   against the actual hero photograph composited with its white veil
+   (`scripts/test_hero_headline_contrast.py`), those tones gave only 1.7:1
+   under the headline and 1.8–2.4:1 on white — so the animation looked good
+   while the message became hard to read.
+
+   Every stop below is a brand tone (navy → teal → cyan) chosen because it
+   MEASURES at least 4.5:1 (WCAG AA) on both backgrounds the heading is
+   painted on: 5.1:1 on the darkest part of the hero backdrop and 7.3:1 on
+   white.  The accent ramp (used inside headings on light pages) holds
+   5.4:1.  The hero headline also carries a tight white halo for the busier
+   parts of the photograph, so the contrast stays stable across the whole
+   hero instead of on one average colour.
+   ============================================================ */
+:root {
+  --hero-headline-gradient: linear-gradient(
+    100deg,
+    #1b2a4a 0%,
+    #115e59 38%,
+    #155e75 72%,
+    #134e4a 100%
+  );
+  --hero-accent-gradient: linear-gradient(
+    100deg,
+    #0f766e 0%,
+    #0e7490 52%,
+    #155e75 100%
+  );
+}
+
 /* Signature GLASS panel */
 .glass-panel {
   background: rgba(255, 255, 255, 0.62);
@@ -995,9 +1040,12 @@ body {
     inset 0 -3px 6px rgba(27, 42, 74, 0.05);
 }
 
-/* Calm trust gradient text — teal → cyan (clarity, finance-tech) */
+/* Calm trust gradient text — teal → cyan (clarity, finance-tech).
+   Paints the shared high-contrast accent ramp (see HEADLINE INK): the
+   accent must stay readable inside dark navy headings, and the light cyan
+   end of the old ramp failed that against the light hero backgrounds. */
 .text-aurora {
-  background: linear-gradient(100deg, #0f766e 0%, #0891b2 52%, #22d3ee 100%);
+  background: var(--hero-accent-gradient);
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;

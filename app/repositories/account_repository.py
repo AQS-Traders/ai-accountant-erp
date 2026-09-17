@@ -117,6 +117,26 @@ async def create_account(
     )
 
 
+async def get_grouping_account_ids(organization_id: uuid.UUID) -> set:
+    """Ids of accounts that are the PARENT of another active account.
+
+    A hierarchical chart of accounts uses such accounts as headings
+    ("Property, Plant & Equipment", "Cost of Sales").  They must never
+    carry a posting, so they must never be resolved as a default account.
+    """
+    rows = await fetch_many(
+        "accounts",
+        filters={"organization_id": str(organization_id), "is_active": True},
+        select="parent_account_id",
+        limit=1000,
+    )
+    return {
+        str(row["parent_account_id"])
+        for row in rows
+        if row.get("parent_account_id")
+    }
+
+
 async def next_available_code(
     organization_id: uuid.UUID, requested_code: str, *, max_probes: int = 200
 ) -> str:
