@@ -228,7 +228,50 @@ _SUPPLIER_PATTERNS = [
     re.compile(r"\bsupplier\s+" + _NAME + _NAME_STOP, re.IGNORECASE),
 ]
 
+# Action verbs, gerunds and document nouns can never START a party name.
+# Without this guard, "create an invoice for selling 2 ovens to lkj pvt
+# limited" captured "selling" as the customer: _NAME_STOP's `\s+\d`
+# lookahead ends the name at the quantity that follows the verb, so the
+# regex never reached the real party after "to".
+_NON_PARTY_WORDS = {
+    "selling", "sold", "sale", "sells", "sell", "buying", "bought", "buy",
+    "purchasing", "purchased", "purchase", "procuring", "acquired",
+    "invoice", "invoicing", "bill", "billing", "quotation", "quote",
+    "creating", "create", "record", "recording", "issue", "issuing",
+    "raise", "raising", "make", "making", "add", "adding", "enter",
+    "entering", "post", "posting", "be", "is", "are", "was", "were",
+    "to", "the", "a", "an", "and", "or",
+}
+
+
+def _is_plausible_party(value: str) -> bool:
+    """True when a captured string can plausibly be a party name.
+
+    Rejects pronouns / short filler and any capture whose FIRST word is an
+    action verb or document noun (``selling``, ``invoice``, ``bought`` ...).
+    That is exactly how "create an invoice for selling 2 ovens to lkj pvt
+    limited" used to produce the customer name "selling".
+    """
+    text = (value or "").strip()
+    if len(text) < 2:
+        return False
+    words = text.split()
+    if not words:
+        return False
+    if text.lower() in ("the", "a", "an", "it", "us", "me", "him", "her", "them"):
+        return False
+    return words[0].strip(",.").lower() not in _NON_PARTY_WORDS
+
 _CUSTOMER_PATTERNS = [
+    # "invoice/quote/bill ... to <party>" — the party is often stated at the
+    # END, after the goods being invoiced ("create an invoice for selling
+    # 2 ovens to lkj pvt limited").  MUST precede the
+    # "invoice ... for <party>" rule below, which would otherwise capture the
+    # verb ("selling") that follows "for".
+    re.compile(
+        r"\b(?:invoice|bill|quotation|quote)\b[^.]*?\bto\s+" + _NAME + _NAME_STOP,
+        re.IGNORECASE,
+    ),
     re.compile(
         r"\bsold\b[^.]*?\bto\s+" + _NAME + _NAME_STOP, re.IGNORECASE
     ),
@@ -515,6 +558,13 @@ def plan(
     item = _extract_item(msg)
     if item:
         entities["item_description"] = item
+        # The count in the item phrasing IS the quantity ("selling 2 ovens").
+        # It used to be discarded, which made the agent ask for a quantity
+        # the user had already given.
+        stated_qty = _extract_item_quantity(msg, item)
+        if stated_qty is not None:
+            entities.setdefault("item_quantity", stated_qty)
+            entities.setdefault("quantity", stated_qty)
     # Work Stream R4.10 — MULTI-LINE ITEMS: several items stated in ONE
     # request ("2 laptops at 5000 each and 3 mice at 500") are parsed into
     # DISTINCT lines; the invoice total is DERIVED from them (Σ qty ×
@@ -1647,10 +1697,9 @@ def _extract_entities(msg: str) -> Dict[str, str]:
             m = pat.search(msg)
             if m:
                 value = m.group(1).strip().rstrip(",.")
-                # Ignore obviously non-name captures
-                if len(value) >= 2 and value.lower() not in (
-                    "the", "a", "an", "it", "us", "me", "him", "her", "them",
-                ):
+                # Ignore obviously non-name captures (pronouns, and any
+                # capture led by a verb/document noun such as "selling").
+                if _is_plausible_party(value):
                     entities[field] = value
                     break
     return entities
@@ -1663,6 +1712,48 @@ def _extract_item(msg: str) -> Optional[str]:
             item = m.group(1).strip()
             if item and item.lower() not in ("it", "something", "goods", "items", "stuff"):
                 return item
+    return None
+
+
+# "<count> <item>" — the count that precedes the item name in the request.
+_ITEM_QTY_RE = re.compile(
+    r"\b(?P<qty>\d+(?:\.\d+)?)\s*"
+    r"(?:x\s+|pcs\b\s*|units?\b\s*|pieces\b\s*|nos\b\s*)?"
+    r"(?P<name>[a-zA-Z][\w\s&.\-/]*?)"
+    r"(?=\s+(?:to|from|for|on|in|at|via)\b|[,.!?;]|\s*$)",
+    re.IGNORECASE,
+)
+
+
+def _extract_item_quantity(msg: str, item: str) -> Optional[float]:
+    """Return the count stated with the item phrasing, when there is one.
+
+        "create an invoice for selling 2 ovens to lkj pvt limited" -> 2.0
+        "sold 5 chairs"                                          -> 5.0
+
+    The count used to be swallowed by the optional quantity group in
+    ``_ITEM_PATTERNS`` and thrown away, so ``item_quantity`` was only ever
+    populated from a clarification ANSWER — the agent therefore asked the
+    user for a quantity that was already in the original request.
+
+    The count is only accepted when the word following it is the SAME item
+    the item extractor found, so an unrelated number in the sentence can
+    never be mistaken for the line quantity.
+    """
+    target = (item or "").strip().lower()
+    if not target:
+        return None
+    for m in _ITEM_QTY_RE.finditer(msg):
+        name = (m.group("name") or "").strip().lower()
+        if not name:
+            continue
+        if name == target or target.startswith(name) or name.startswith(target):
+            try:
+                qty = float(m.group("qty"))
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                return qty
     return None
 
 
