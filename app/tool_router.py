@@ -126,7 +126,24 @@ async def route_tool_call(
     read_only = entry["read_only"]
 
     # 2. Permission check (via ai.permissions)
-    if auth is not None:
+    if auth is None:
+        # SECURITY: a MUTATION must never execute without an authorization
+        # context.  The AI worker used to pass auth=None, which skipped BOTH
+        # the permission check and the parameter validation below, so a
+        # queued job could create financial documents with no authorization
+        # at all.  Fail closed instead.
+        if not read_only:
+            log.error("tool_router.missing_auth_for_mutation", tool=slug)
+            return ToolResult(
+                tool_name=slug,
+                success=False,
+                error=(
+                    "Authorization context missing: mutations cannot run "
+                    "without an authenticated user."
+                ),
+            )
+        log.warning("tool_router.read_without_auth", tool=slug)
+    else:
         permitted = await authorize_tool(slug, auth=auth)
         if not permitted:
             log.warning(
@@ -142,7 +159,7 @@ async def route_tool_call(
             )
 
     # 3. Parameter validation for mutations
-    if not read_only and auth is not None:
+    if not read_only:
         validation = await validate_operation(
             organization_id=organization_id,
             operation=slug,
