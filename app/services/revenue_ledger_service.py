@@ -190,6 +190,51 @@ async def resolve_revenue_account(
     return None, label, "ambiguous"
 
 
+# The heading stream ledgers group under when the chart has no general revenue
+# account of its own (see ensure_revenue_parent).
+REVENUE_PARENT_NAME = "Revenue"
+
+
+async def ensure_revenue_parent(
+    organization_id: uuid.UUID,
+) -> Optional[Dict[str, Any]]:
+    """The account that dedicated stream ledgers hang under — created if needed.
+
+    Prefers an existing GENERAL revenue account ("Operating Revenue", "Revenue",
+    ...).  When the chart contains only SPECIFIC stream accounts (for example a
+    software house whose revenue accounts are "Software Development Revenue",
+    "Consulting Revenue", ...), it creates a root "Revenue" heading instead.
+
+    Without this, a goods sale's ledger would be parented to whichever specific
+    service stream happened to sort first — reporting "Mobile Phone Sales" as a
+    child of "Software Development Revenue", which is exactly the kind of
+    nonsense this feature exists to prevent.
+    """
+    general = await find_general_revenue(organization_id)
+    if general is not None:
+        return general
+
+    rows = await list_revenue_accounts(organization_id)
+    for row in rows:
+        if _norm(row.get("name")) == _norm(REVENUE_PARENT_NAME):
+            return row
+
+    code = await a_repo.next_available_code(organization_id, "4000")
+    created = await a_repo.create_account(
+        organization_id=organization_id,
+        code=code,
+        name=REVENUE_PARENT_NAME,
+        account_type="REVENUE",
+        normal_balance="CREDIT",
+        parent_account_id=None,
+        description=(
+            "Revenue heading — dedicated revenue-stream ledgers group under this."
+        ),
+    )
+    log.info("revenue_ledger.parent_created", code=code, name=REVENUE_PARENT_NAME)
+    return created
+
+
 async def find_parent_revenue(
     organization_id: uuid.UUID,
 ) -> Optional[Dict[str, Any]]:
@@ -245,7 +290,7 @@ async def create_stream_ledger(
     if existing is not None:
         return existing, False
 
-    parent = parent or await find_parent_revenue(organization_id)
+    parent = parent or await ensure_revenue_parent(organization_id)
     code = await _next_child_code(organization_id, parent)
     created = await a_repo.create_account(
         organization_id=organization_id,

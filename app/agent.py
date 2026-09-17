@@ -1177,8 +1177,8 @@ async def _revenue_ledger_review_gate(
         return None
 
     proposed = rls.suggest_ledger_name(label) if label else "a new ledger"
-    parent = await rls.find_parent_revenue(organization_id)
-    parent_name = (parent or {}).get("name") or "Revenue"
+    general = await rls.find_general_revenue(organization_id)
+    parent_name = (general or {}).get("name") or rls.REVENUE_PARENT_NAME
     return {
         "question": (
             f"Revenue ledger check: nothing is recorded against '{label}' yet. "
