@@ -1186,9 +1186,17 @@ async def _revenue_ledger_review_gate(
             f"this revenue is reported separately? Reply YES to create it, or "
             f"reply with the name of an existing revenue account to use instead."
         ),
+        # AgentResponse.options is List[str] — the frontend renders each entry
+        # as a tappable chip and calls opt.trim() on it.  Emitting
+        # {"value": ..., "label": ...} dicts here raised a Pydantic
+        # ValidationError ("Input should be a valid string [type=string_type,
+        # input_value={'value': 'yes', 'label': ...}]") that failed the WHOLE
+        # session, and would also have thrown a TypeError in the browser.
+        # The planner's decision parser accepts these labels: "Create ..."
+        # -> CREATE, anything else -> USE_EXISTING.
         "options": [
-            {"value": "yes", "label": f"Create '{proposed}' under {parent_name}"},
-            {"value": "no", "label": f"Use the existing '{parent_name}' account"},
+            f"Create '{proposed}' under {parent_name}",
+            f"Use the existing '{parent_name}' account",
         ],
     }
 
