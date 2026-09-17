@@ -57,6 +57,24 @@ from app.models.schemas import ExecutionPlan
 
 log = structlog.get_logger(__name__)
 
+
+# Intents whose nature comes from the EXPENSE decision tree
+# (FIXED_ASSET / INVENTORY / CONSUMABLE / OPERATING_EXPENSE / SERVICE).
+#
+# A LEARNED nature preference is only meaningful inside this family.  It must
+# never answer a SALE: a sale's nature vocabulary is
+# GOODS / SERVICE / ASSET_DISPOSAL / OTHER_INCOME, and applying an expense
+# nature to one both mislabels the transaction ("Nature: Operating Expense" on
+# a sale) and suppresses the sale-type question, which then lets the revenue
+# account be resolved silently by fuzzy name match.
+_EXPENSE_NATURE_INTENTS = frozenset({
+    "record_expense",
+    "record_purchase",
+    "record_cash_purchase",
+    "record_credit_purchase",
+    "register_fixed_asset",
+})
+
 # Work Stream B: hard ceiling on batch size - beyond this the request is
 # treated as a single (possibly itemised) transaction instead of N
 # documents, preventing pathological N-document explosions.
@@ -629,7 +647,21 @@ def plan(
         # a CREDIT answer pulls the party question into the next round.
         # A learned payment_method preference is deliberately NOT
         # auto-applied (it stays recorded for reporting only).
-        if not entities.get("transaction_nature") and prefs.get("transaction_nature"):
+        #
+        # LIVE DEFECT (fixed): the learned nature default was applied to ANY
+        # intent, including SALES.  Its vocabulary is the EXPENSE decision
+        # tree (FIXED_ASSET / INVENTORY / CONSUMABLE / OPERATING_EXPENSE /
+        # SERVICE), so a sale inherited an expense nature — which is how
+        # "Record Sale of Mobile PHONE" was recorded with
+        # transaction_nature=OPERATING_EXPENSE and the UI badge read
+        # "Nature: Operating Expense" on a SALE.  It also suppressed the
+        # sale-type question, so the revenue account was resolved silently.
+        # A learned nature may only answer where that taxonomy applies.
+        if (
+            not entities.get("transaction_nature")
+            and prefs.get("transaction_nature")
+            and intent in _EXPENSE_NATURE_INTENTS
+        ):
             entities["transaction_nature"] = prefs["transaction_nature"]
             # Work Stream R: a learned org default answered the nature.
             nature_source = "PREFERENCE"

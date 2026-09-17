@@ -677,7 +677,13 @@ async def latest_active_session(
     for s in sessions or []:
         status = str(s.get("status") or "").upper()
         if status not in _ACTIVE_RUN_STATUSES and status != "WAITING_FOR_USER":
-            continue  # terminal — never re-attach
+            # TERMINAL — and that is a hard boundary, not just "skip this row".
+            # A newer run has SETTLED, so nothing older can still be pending.
+            # Falling through to an older parked session was the defect: after
+            # a run COMPLETED, reattach walked past it and reported a
+            # superseded WAITING_FOR_USER row, showing "your last request is
+            # still waiting for your answer" about a request already abandoned.
+            break
         age = _row_age_seconds(s)
         ttl = (
             _AWAITING_USER_TTL_SECONDS
@@ -685,6 +691,9 @@ async def latest_active_session(
             else _ACTIVE_RUN_TTL_SECONDS
         )
         if age is not None and age > ttl:
+            # STRANDED (executor killed mid-flight) — close it and keep
+            # looking: a stranded row must never mask a genuinely live run
+            # sitting behind it.
             await _stamp_stranded_run(s, age)
             continue
         return {

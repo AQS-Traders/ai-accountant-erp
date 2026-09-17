@@ -1035,6 +1035,85 @@ def _mutation_executed(tool_calls: List[ToolCall]) -> bool:
             return True
     return False
 
+# Statuses that can still move.  Distinct from main.py's set (which
+# deliberately EXCLUDES WAITING_FOR_USER so reattach does not re-attach a
+# parked run): here a parked run IS non-terminal and must be closed when a
+# newer request supersedes it.
+_NON_TERMINAL_RUN_STATUSES = {
+    "PENDING",
+    "PLANNING",
+    "EXECUTING",
+    "WAITING_FOR_USER",
+}
+
+
+async def _close_superseded_sessions(
+    organization_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    keep_session_id: uuid.UUID,
+) -> int:
+    """Close non-terminal sessions for this user+org that a NEW request has
+    superseded.
+
+    LIVE DEFECT: when a run parked on a clarification question and the user
+    simply re-sent the request instead of answering, the parked session was
+    left WAITING_FOR_USER for ever (`completed_at` NULL).  Multiple such
+    orphans accumulated (three sessions for one sale request) and then
+    /api/ai/sessions/latest-active — which walks newest-first and SKIPS
+    terminal rows — returned an OLD parked session, so the dashboard showed
+
+        "Your last request is still waiting for your answer.
+         Send it again to continue."
+
+    immediately after a run that had already COMPLETED successfully.  Sending
+    a new request is an explicit statement that the previous one is abandoned,
+    so the abandoned rows are closed here rather than left dangling.
+
+    Only rows the caller owns (same org AND user) are touched.  Best-effort:
+    a cleanup failure must never block the run itself.
+    """
+    superseded = 0
+    try:
+        rows = await fetch_many(
+            "ai_execution_sessions",
+            filters={
+                "organization_id": str(organization_id),
+                "user_id": str(user_id),
+            },
+            select="id,status,current_phase,updated_at",
+            order="created_at.desc",
+            limit=25,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the new run
+        log.warning("agent.supersede_lookup_failed", error=str(exc)[:200])
+        return 0
+
+    for row in rows or []:
+        try:
+            if str(row.get("id")) == str(keep_session_id):
+                continue
+            status = str(row.get("status") or "").upper()
+            if status not in _NON_TERMINAL_RUN_STATUSES:
+                continue  # already terminal — never rewrite history
+            await _update_status(uuid.UUID(str(row["id"])), ExecutionStatus.CANCELLED)
+            superseded += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "agent.supersede_failed",
+                session_id=str(row.get("id")),
+                error=str(exc)[:200],
+            )
+
+    if superseded:
+        log.info(
+            "agent.superseded_sessions_closed",
+            count=superseded,
+            kept_session=str(keep_session_id),
+        )
+    return superseded
+
+
 _PHASE_STATUS_MAP: Dict[ExecutionStatus, tuple] = {
     ExecutionStatus.RECEIVED: ("PENDING", False),
     ExecutionStatus.INTERPRETING: ("PLANNING", False),
@@ -1510,6 +1589,17 @@ async def execute(
         )
         session_id = uuid.UUID(session["id"])
         await _log_step(session_id, "RECEIVED", {"message": user_message})
+
+        # A new request SUPERSEDES any earlier run of this user that is still
+        # non-terminal (e.g. parked on a question the user chose not to answer
+        # and simply re-sent instead).  Without this the abandoned row stays
+        # WAITING_FOR_USER for ever and reattach later reports it as a live
+        # pending question — the "still waiting for your answer" banner that
+        # appeared immediately after a run that had COMPLETED.  Best-effort:
+        # it can never block or fail this run.
+        await _close_superseded_sessions(
+            organization_id, user_id, keep_session_id=session_id
+        )
 
         # Carry Q&A answered in earlier rounds of this conversation into the
         # resumed session, so its clarification history stays complete and
@@ -2894,15 +2984,41 @@ async def flush_step_logs() -> None:
             log.warning("agent.step_log_failed", error=str(exc))
 
 
+# Step types that PARK a run or close it.  These are written DURABLY (awaited)
+# rather than queued: the session status is persisted synchronously, so if the
+# serverless invocation is torn down between the status write and the queue
+# flush, a queued step would be lost and the dashboard would show "waiting for
+# your answer" with NO question to answer.  That inconsistency is what made
+# users re-send instead of answering and left orphaned WAITING_FOR_USER rows.
+_DURABLE_STEP_TYPES = {
+    "AWAITING_CLARIFICATION",
+    "AWAITING_CONFIRMATION",
+    "FAILED",
+}
+
+
 async def _log_step(session_id: uuid.UUID, step_type: str, data: Dict[str, Any]) -> None:
-    """Fire-and-forget step write: scheduled on the background queue."""
-    _spawn_step_write(
-        create_execution_step(
-            session_id=session_id,
-            step_type=step_type,
-            step_data=data,
-        )
+    """Record an execution step.
+
+    Fire-and-forget by default: the write is scheduled on the background queue
+    and drained by flush_step_logs() before the request returns, so audit
+    writes never sit in the user's critical path.
+
+    Steps that park or close the run are the exception — see
+    _DURABLE_STEP_TYPES — and are awaited here.
+    """
+    coro = create_execution_step(
+        session_id=session_id,
+        step_type=step_type,
+        step_data=data,
     )
+    if step_type in _DURABLE_STEP_TYPES:
+        try:
+            await coro
+        except Exception as exc:  # noqa: BLE001 — never fail the run on audit
+            log.warning("agent.step_log_failed", step=step_type, error=str(exc))
+        return
+    _spawn_step_write(coro)
 
 
 def _mutation_date(

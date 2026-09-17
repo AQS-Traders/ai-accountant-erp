@@ -218,25 +218,45 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
             organization_id, account_type="ASSET", limit=5
         )
         cash = assets[0] if assets else None
-    revenue = await accounting_service.resolve_account(
-        organization_id, account_name="Sales Revenue"
+    # ---- REVENUE ACCOUNT -------------------------------------------------
+    # DIRECTIVE: never "the first REVENUE account in the chart".  See
+    # app/services/revenue_ledger_service.py — an unresolved revenue stream is
+    # a QUESTION for the user, not a coin toss.  The previous fuzzy fallback
+    # credited a MOBILE PHONE sale to *Software Development Revenue* purely
+    # because that account sorted first in a software house's chart.
+    from app.services import revenue_ledger_service
+
+    revenue, stream, revenue_source = (
+        await revenue_ledger_service.resolve_revenue_account(
+            organization_id, description
+        )
     )
-    if not revenue:
-        revenue = await accounting_service.resolve_account(
-            organization_id, account_name="Revenue"
+    if revenue is None:
+        if stream:
+            ask = (
+                "This sale has no dedicated revenue ledger. Ask the user "
+                "whether to create a dedicated revenue ledger named "
+                f"'{revenue_ledger_service.suggest_ledger_name(stream)}' for "
+                f"'{stream}', and which existing revenue account it should "
+                "belong under — or which existing revenue account to use "
+                "instead. Never choose a revenue account silently."
+            )
+        else:
+            ask = (
+                "The item sold was not specific enough to name a revenue "
+                "ledger, and the chart has more than one revenue account. "
+                "Ask the user which revenue account this sale belongs to."
+            )
+        return ToolResult(
+            tool_name="record_cash_sale", success=False, error=ask
         )
-    if not revenue:
-        revenues = await account_repo.get_chart_of_accounts(
-            organization_id, account_type="REVENUE", limit=5
-        )
-        revenue = revenues[0] if revenues else None
-    if not cash or not revenue:
+    if not cash:
         return ToolResult(
             tool_name="record_cash_sale",
             success=False,
             error=(
-                "Cannot resolve the Cash or Revenue account in the chart of "
-                "accounts. Ask the user which accounts to use."
+                "Cannot resolve the Cash account in the chart of accounts. "
+                "Ask the user which asset account to use."
             ),
         )
 
@@ -274,6 +294,11 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
             result["journal_warning"] = f"Journal prepared but posting failed: {exc}"
     result["cash_account"] = cash.get("name")
     result["revenue_account"] = revenue.get("name")
+    # Audit trail: HOW the revenue account was chosen (stream / only-one), so a
+    # reviewer can see it was resolved deliberately rather than by sort order.
+    result["revenue_account_source"] = revenue_source
+    if stream:
+        result["revenue_stream"] = stream
     return ToolResult(tool_name="record_cash_sale", success=True, data=result)
 
 # ===================================================================
