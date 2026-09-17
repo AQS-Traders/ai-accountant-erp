@@ -1,0 +1,16 @@
+{
+  "name": "expense_nature_capitalisable_routes_to_asset",
+  "message": "record expense: office renovation Rs.80,000",
+  "history": [
+    {
+      "question": "What is the nature of this expense: (a) an OPERATING EXPENSE (day-to-day running cost), (b) a PREPAID EXPENSE (paid in advance), (c) a CAPITALISABLE ITEM (a fixed asset to be capitalised), or (d) an OWNER DRAWING (personal, not business)? Please answer with a, b, c or d.",
+      "answer": "c"
+    }
+  ],
+  "expected": {
+    "intent": "register_fixed_asset",
+    "entities": {
+      "transaction_nature": "FIXED_ASSET"
+    }
+  }
+}

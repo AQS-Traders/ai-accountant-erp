@@ -1,0 +1,7 @@
+{
+  "name": "create_product_intent",
+  "message": "add a new product HP printer",
+  "expected": {
+    "intent": "create_product"
+  }
+}

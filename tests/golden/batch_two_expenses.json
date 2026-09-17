@@ -1,0 +1,12 @@
+{
+  "name": "batch_two_expenses",
+  "message": "Record these 2 expenses:\n1. Office supplies Rs.5,000\n2. Fuel Rs.3,000",
+  "expected": {
+    "intent": "record_expense",
+    "batch_items": 2,
+    "requires_clarification": true,
+    "question_includes": [
+      "what is this expense for"
+    ]
+  }
+}

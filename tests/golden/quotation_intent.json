@@ -1,0 +1,14 @@
+{
+  "name": "quotation_intent",
+  "message": "create a quotation for the customer",
+  "expected": {
+    "intent": "create_quotation",
+    "missing_includes": [
+      "transaction_date",
+      "transaction_nature"
+    ],
+    "question_includes": [
+      "is this quotation for"
+    ]
+  }
+}

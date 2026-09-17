@@ -1,0 +1,28 @@
+{
+  "name": "nature_answer_fixed_asset_routes_to_asset",
+  "message": "I purchased a table for Rs.25,000",
+  "history": [
+    {
+      "question": "Is this item: (a) a FIXED ASSET (long-term use, to be capitalised), (b) an INVENTORY-STOCKED PRODUCT (resale stock — catalog flag only, quantities are not tracked), (c) a CONSUMABLE / one-off EXPENSE (expensed immediately), or (d) a SERVICE? Please answer with a, b, c or d.",
+      "answer": "a"
+    },
+    {
+      "question": "Was this paid in cash or on credit?",
+      "answer": "cash"
+    },
+    {
+      "question": "What is the transaction date? Reply TODAY, or the date as YYYY-MM-DD or DD/MM/YYYY (for example 2026-09-04 or 04/09/2026).",
+      "answer": "04/09/2026"
+    }
+  ],
+  "expected": {
+    "intent": "register_fixed_asset",
+    "requires_clarification": false,
+    "entities": {
+      "transaction_nature": "FIXED_ASSET",
+      "payment_method": "CASH",
+      "amount": 25000.0,
+      "transaction_date": "2026-09-04"
+    }
+  }
+}

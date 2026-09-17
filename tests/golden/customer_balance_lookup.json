@@ -1,0 +1,8 @@
+{
+  "name": "customer_balance_lookup",
+  "message": "how much does the customer owe",
+  "expected": {
+    "intent": "customer_balance",
+    "requires_clarification": false
+  }
+}

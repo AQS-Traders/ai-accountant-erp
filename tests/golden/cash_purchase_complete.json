@@ -1,0 +1,18 @@
+{
+  "name": "cash_purchase_complete",
+  "message": "I bought a Dell laptop for Rs.150,000 in cash yesterday.",
+  "expected": {
+    "intent": "record_cash_purchase",
+    "requires_clarification": true,
+    "missing_includes": [
+      "transaction_nature"
+    ],
+    "question_includes": [
+      "fixed asset"
+    ],
+    "entities": {
+      "amount": 150000.0,
+      "payment_method": "CASH"
+    }
+  }
+}

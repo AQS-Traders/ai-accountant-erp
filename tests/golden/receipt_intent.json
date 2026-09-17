@@ -1,0 +1,18 @@
+{
+  "name": "receipt_intent",
+  "message": "received payment of Rs.20,000 from the customer",
+  "expected": {
+    "intent": "record_receipt",
+    "missing_includes": [
+      "transaction_date",
+      "transaction_nature",
+      "payment_type"
+    ],
+    "question_includes": [
+      "business operation"
+    ],
+    "entities": {
+      "amount": 20000.0
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "fixed_asset_registration",
+  "message": "register a new fixed asset generator for Rs.850,000",
+  "expected": {
+    "intent": "register_fixed_asset",
+    "missing_includes": [
+      "asset_name"
+    ],
+    "question_excludes": [
+      "nature"
+    ],
+    "entities": {
+      "amount": 850000.0
+    }
+  }
+}

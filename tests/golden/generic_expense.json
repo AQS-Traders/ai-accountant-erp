@@ -1,0 +1,21 @@
+{
+  "name": "generic_expense",
+  "message": "record expense: internet Rs.5,000",
+  "expected": {
+    "intent": "record_expense",
+    "missing_includes": [
+      "transaction_date",
+      "transaction_purpose",
+      "settlement_position"
+    ],
+    "question_includes": [
+      "what is this expense for"
+    ],
+    "question_excludes": [
+      "nature of this expense"
+    ],
+    "entities": {
+      "amount": 5000.0
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "invoice_intent",
+  "message": "create an invoice for Rs.30,000",
+  "expected": {
+    "intent": "create_invoice",
+    "missing_includes": [
+      "transaction_date",
+      "transaction_nature"
+    ],
+    "entities": {
+      "amount": 30000.0
+    }
+  }
+}

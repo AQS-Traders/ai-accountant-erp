@@ -1,0 +1,8 @@
+{
+  "name": "list_banks",
+  "message": "list bank accounts",
+  "expected": {
+    "intent": "list_bank_accounts",
+    "requires_clarification": false
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "date_answer_resolves",
+  "message": "bought a chair for Rs.5,000",
+  "history": [
+    {
+      "question": "What is the transaction date? Reply TODAY, or the date as YYYY-MM-DD or DD/MM/YYYY (for example 2026-09-04 or 04/09/2026).",
+      "answer": "04/09/2026"
+    }
+  ],
+  "expected": {
+    "intent": "record_purchase",
+    "requires_clarification": true,
+    "missing_includes": [
+      "payment_type",
+      "transaction_nature"
+    ],
+    "entities": {
+      "transaction_date": "2026-09-04"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "supplier_payment_intent",
+  "message": "paid the supplier Rs.12,000",
+  "expected": {
+    "intent": "record_payment",
+    "missing_includes": [
+      "transaction_nature"
+    ],
+    "entities": {
+      "amount": 12000.0
+    }
+  }
+}

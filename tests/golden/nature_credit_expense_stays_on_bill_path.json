@@ -1,0 +1,25 @@
+{
+  "name": "nature_credit_expense_stays_on_bill_path",
+  "message": "I purchased a charger",
+  "history": [
+    {
+      "question": "Is this item: (a) a FIXED ASSET (long-term use, to be capitalised), (b) an INVENTORY-STOCKED PRODUCT (resale stock — catalog flag only, quantities are not tracked), (c) a CONSUMABLE / one-off EXPENSE (expensed immediately), or (d) a SERVICE? Please answer with a, b, c or d.",
+      "answer": "c"
+    },
+    {
+      "question": "Was this paid in cash or on credit?",
+      "answer": "credit"
+    },
+    {
+      "question": "What is the transaction date? Reply TODAY, or the date as YYYY-MM-DD or DD/MM/YYYY (for example 2026-09-04 or 04/09/2026).",
+      "answer": "04/09/2026"
+    }
+  ],
+  "expected": {
+    "intent": "record_credit_purchase",
+    "entities": {
+      "transaction_nature": "OPERATING_EXPENSE",
+      "payment_method": "CREDIT"
+    }
+  }
+}

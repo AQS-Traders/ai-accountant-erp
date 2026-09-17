@@ -1,0 +1,13 @@
+{
+  "name": "bank_transfer",
+  "message": "transfer Rs.50,000 from HBL to Meezan",
+  "expected": {
+    "intent": "record_bank_transfer",
+    "missing_includes": [
+      "transaction_date"
+    ],
+    "entities": {
+      "amount": 50000.0
+    }
+  }
+}

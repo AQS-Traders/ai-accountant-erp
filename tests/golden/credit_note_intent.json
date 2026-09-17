@@ -1,0 +1,13 @@
+{
+  "name": "credit_note_intent",
+  "message": "issue a credit note for the damaged goods",
+  "expected": {
+    "intent": "create_credit_note",
+    "missing_includes": [
+      "transaction_nature"
+    ],
+    "question_includes": [
+      "return of goods"
+    ]
+  }
+}
