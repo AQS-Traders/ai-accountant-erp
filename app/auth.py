@@ -279,6 +279,26 @@ async def _resolve_role(role_id: str) -> Dict[str, Any]:
     return role or {}
 
 
+def _dev_header_auth_enabled() -> bool:
+    """True only when the legacy ``X-User-Id`` header fallback is permitted.
+
+    The fallback exists for local development and for minting test tokens.
+    It must NEVER be active in staging or production, so it requires BOTH
+    of the following:
+
+    * ``app_env == "development"`` -- an ``APP_ENV`` of ``production`` or
+      ``staging`` disables the path outright.
+    * ``allow_dev_header_auth is True`` -- an explicit opt-in that defaults
+      to ``False``.
+
+    Because the flag defaults to false, an unconfigured deployment fails
+    CLOSED: a request carrying only ``X-User-Id`` is treated as
+    unauthenticated (HTTP 401) instead of being trusted as that user.
+    """
+    settings = get_settings()
+    return settings.app_env == "development" and settings.allow_dev_header_auth
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -360,7 +380,9 @@ async def authenticate_user(
             raise HTTPException(status_code=401, detail="Invalid token: malformed user ID")
 
     # Legacy development header fallback (no organization required).
-    if x_user_id:
+    # SECURITY: ignored unless running in development with the explicit
+    # ALLOW_DEV_HEADER_AUTH opt-in; never trusted in staging/production.
+    if x_user_id and _dev_header_auth_enabled():
         try:
             return UserContext(user_id=uuid.UUID(x_user_id))
         except (ValueError, TypeError):
@@ -397,8 +419,10 @@ async def authenticate_header(
     if authorization and authorization.startswith("Bearer "):
         return await authenticate(authorization)
 
-    # Fallback to header-based auth (development ONLY)
-    if x_user_id:
+    # Fallback to header-based auth (development ONLY).
+    # SECURITY: ignored unless running in development with the explicit
+    # ALLOW_DEV_HEADER_AUTH opt-in; never trusted in staging/production.
+    if x_user_id and _dev_header_auth_enabled():
         try:
             user_id = uuid.UUID(x_user_id)
         except (ValueError, TypeError):

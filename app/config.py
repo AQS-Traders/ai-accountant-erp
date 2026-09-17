@@ -182,6 +182,16 @@ class Settings(BaseSettings):
         description="Legacy HS256 JWT secret (fallback for pre-rotation tokens)",
     )
     jwt_verify_exp: bool = Field(default=True, description="Verify JWT expiration")
+    allow_dev_header_auth: bool = Field(
+        default=False,
+        description=(
+            "Permit the legacy X-User-Id header authentication fallback. "
+            "Honoured ONLY when app_env == 'development'; ignored in staging "
+            "and production. Defaults to false so an unconfigured or "
+            "misconfigured deployment fails closed and treats a header-only "
+            "request as unauthenticated."
+        ),
+    )
 
     # ---- Database --------------------------------------------------------
     database_pool_size: int = Field(default=10)
