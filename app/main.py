@@ -164,12 +164,20 @@ async def health_check():
 
 
 @app.get("/api/ai/providers")
-async def ai_providers(force: bool = False):
+async def ai_providers(
+    force: bool = False,
+    auth: AuthContext = Depends(get_current_user),
+):
     """AI provider health/status — is Qwen (primary) or Gemini (fallback) available?
 
     Never raises: each provider reports configured/available/detail
     independently, so the ERP can degrade gracefully. Results are cached
     briefly (see provider_health_ttl_seconds); pass ?force=true to refresh.
+
+    AUTH REQUIRED: probing providers performs real round-trips to the AI
+    vendors (each selecting/initialising a client), so an unauthenticated
+    caller could both burn vendor quota and read the internal workspace
+    endpoint. Only an authenticated org member may trigger it.
     """
     from app.ai_orchestrator import get_client
 
@@ -387,7 +395,17 @@ async def ai_execute_stream(
                         + json.dumps(
                             {
                                 "step_type": step.get("step_type"),
-                                "phase": step.get("step_type"),
+                                # The PHASE - not the coarse enum.  `description`
+                                # holds the real phase name (INTERPRETING,
+                                # PLANNING, CONTEXT_LOADING, EXECUTING, ...),
+                                # which is what the progress UI maps to a label
+                                # and colours.  Sending the enum (REASON/
+                                # RETRIEVE) matched nothing in the UI's
+                                # PHASE_ORDER, so every run displayed the
+                                # fallback string "Agent working" and the
+                                # pipeline stages never lit up.  This now
+                                # matches /api/ai/progress exactly.
+                                "phase": step.get("description") or step.get("step_type"),
                                 "status": step.get("status"),
                                 "created_at": str(step.get("created_at")),
                             }

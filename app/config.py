@@ -70,7 +70,16 @@ class Settings(BaseSettings):
     # directs new integrations to gemini-3.6-flash.
     gemini_model: str = Field(default="gemini-3.6-flash")
     gemini_temperature: float = Field(default=0.1)
-    gemini_max_output_tokens: int = Field(default=8192)
+    gemini_max_output_tokens: int = Field(
+        default=2048,
+        description=(
+            "Cap on generated tokens. The agent returns JSON tool calls and a "
+            "short summary, so 8192 wasted latency: output tokens dominate "
+            "generation time and a stalled turn burns the whole planning "
+            "budget. Verified against the light-budget path (600 tokens), "
+            "which already returned correct tool calls."
+        ),
+    )
     gemini_top_p: float = Field(default=0.95)
     gemini_top_k: int = Field(default=40)
 
@@ -108,8 +117,14 @@ class Settings(BaseSettings):
     # NOTE: qwen3.7-plus is BANNED from the active chain (constitution rule);
     # qwen-plus-2025-07-28 does NOT exist on the workspace (stale reference).
     qwen_model_chain: str = Field(
-        default="qwen3.6-plus,qwen3.5-plus,qwen-max,qwen-plus",
-        description="Ordered Qwen fallback chain for text/tool ERP requests",
+        default="qwen3.6-plus,qwen-max",
+        description=(
+            "Ordered Qwen fallback chain for text/tool ERP requests. Trimmed "
+            "from 4 models to 2: the orchestrator ALREADY falls back to Gemini "
+            "after this chain, so extra Qwen entries only multiplied the "
+            "worst-case time (3-4 models x internal retries x timeout) without "
+            "adding a distinct provider."
+        ),
     )
     qwen_vision_model_chain: str = Field(
         default="qwen3-vl-plus,qwen3-vl-flash",
@@ -120,8 +135,25 @@ class Settings(BaseSettings):
         description="Models that must NEVER be selected at runtime",
     )
     qwen_temperature: float = Field(default=0.1)
-    qwen_max_output_tokens: int = Field(default=8192)
-    qwen_timeout_seconds: float = Field(default=120.0)
+    qwen_max_output_tokens: int = Field(
+        default=2048,
+        description=(
+            "Cap on generated tokens. See gemini_max_output_tokens — the agent "
+            "emits JSON tool calls, not prose, so a large cap only adds latency. "
+            "Measured impact: every extra 1000 output tokens adds seconds to a "
+            "turn, and up to MAX_TOOL_ITERATIONS turns are chained per run."
+        ),
+    )
+    qwen_timeout_seconds: float = Field(
+        default=30.0,
+        description=(
+            "Per-ATTEMPT HTTP timeout. Was 120s, which combined with the "
+            "client's internal retries and the multi-model chain allowed a "
+            "single stalled provider to consume minutes of a request. The "
+            "provider round-trip itself is ~3-5s from the deployed region, so "
+            "30s is a generous ceiling for a real generation."
+        ),
+    )
 
     # ---- Provider orchestration ------------------------------------------
     ai_primary_provider: str = Field(

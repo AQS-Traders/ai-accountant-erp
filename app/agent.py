@@ -88,15 +88,16 @@ _CUSTOMER_PARTY_INTENTS = {
 # SERVERLESS PROVIDER BUDGET (live defect: FUNCTION_INVOCATION_TIMEOUT)
 # ---------------------------------------------------------------------------
 # A provider round-trip retries internally (Qwen: 3 attempts, each bounded by
-# qwen_timeout_seconds=120s) and then falls back to Gemini.  A single stalled
+# qwen_timeout_seconds) and then falls back to the next model / Gemini.  With
+# the original 120s timeout and a 4-model chain a single stalled
 # planning/execution call could therefore consume 300s+ — past the host's
 # function limit.  The platform then killed the function mid-run: the session
 # stayed EXECUTING forever, no tool call was ever recorded, and the user saw a
 # bare timeout error with no way forward.  Every provider round-trip is now
 # bounded by an explicit wall-clock budget, so on expiry the run degrades to
 # an honest, resumable response instead of being killed.
-_LLM_PLANNING_BUDGET_SECONDS = 100.0
-_LLM_EXECUTION_BUDGET_SECONDS = 170.0
+_LLM_PLANNING_BUDGET_SECONDS = 75.0
+_LLM_EXECUTION_BUDGET_SECONDS = 120.0
 
 
 async def _bounded_provider_call(coro, *, budget: float, stage: str):
@@ -2060,6 +2061,17 @@ async def execute(
             # the model (the deterministic fast-path did not apply - ambiguous
             # phrasing) get a lighter output budget.
             light_budget = execution_plan.intent in _LIGHT_BUDGET_INTENTS
+            # PROGRESS VISIBILITY: the planning round-trip is the first point
+            # where a request sits for tens of seconds doing nothing the user
+            # can see (measured 6-16s; the provider endpoint itself costs
+            # ~15-20s per probe from ap-southeast-1).  Emit the INTERPRETING
+            # phase so the progress UI shows a real stage with rotating status
+            # text instead of freezing on the last recorded one.
+            # _STEP_TYPE_MAP already maps INTERPRETING -> REASON.
+            await _log_step(session_id, "INTERPRETING", {
+                "source": "llm_planning",
+                "intent": execution_plan.intent,
+            })
             _phase_elapsed("llm_call.start")
             planning_result, provider_stall = await _bounded_provider_call(
                 client.generate_with_tools(
@@ -2347,6 +2359,13 @@ async def execute(
         # executes its pre-built tool calls DIRECTLY — no LLM round-trip,
         # exactly what "bypass_llm" always promised.
         if deterministic_calls is not None:
+            # PROGRESS VISIBILITY: mirror the LLM path so the pipeline lights
+            # the same EXECUTING stage on the fast path too.
+            await _log_step(session_id, "EXECUTING", {
+                "source": "deterministic",
+                "intent": execution_plan.intent,
+                "tools_planned": len(planned_tool_calls),
+            })
             executed = await execute_planned_tool_calls(
                 planned_tool_calls, _executor
             )
@@ -2364,6 +2383,17 @@ async def execute(
                 ],
             }
         else:
+            # PROGRESS VISIBILITY: the iterative executor loop (up to
+            # MAX_TOOL_ITERATIONS model round-trips) is the single longest
+            # silent stretch of a run — measured 46-129s with NOTHING written
+            # to ai.execution_steps.  Emit EXECUTING first so the UI reports
+            # "Executing trusted tools" for the whole loop instead of
+            # appearing hung.
+            await _log_step(session_id, "EXECUTING", {
+                "source": "llm_execution",
+                "intent": execution_plan.intent,
+                "tools_planned": len(planned_tool_calls),
+            })
             final_result, provider_stall = await _bounded_provider_call(
                 client.generate_with_tools(
                     user_message=user_message,

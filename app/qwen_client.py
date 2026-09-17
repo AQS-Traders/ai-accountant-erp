@@ -62,8 +62,8 @@ class QwenClient:
         base_url: str,
         model: str,
         temperature: float = 0.1,
-        max_output_tokens: int = 8192,
-        timeout_seconds: float = 120.0,
+        max_output_tokens: int = 2048,
+        timeout_seconds: float = 30.0,
     ) -> None:
         if not api_key:
             raise ProviderError("Qwen API key is not configured (set QWEN_API_KEY)")
