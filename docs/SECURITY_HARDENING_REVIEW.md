@@ -242,5 +242,31 @@ impersonation attempted — the identity is a random UUID that exists nowhere):
 A header-only request is treated as *authenticated* (403 "not a member") rather
 than *unauthenticated* (401). With a real member's UUID — trivially obtainable
 from `organization_members` through the client, which is readable by
-co-members — the old code grants that user's full access. After deploying the
-fix, the same request becomes `401`.
+co-members — the old code grants that user's full access.
+
+### DEPLOYED AND VERIFIED IN PRODUCTION (2026-09-18)
+
+`main` was fast-forwarded `b728876..e8f5583` and pushed; Vercel deployed
+production (`ai-accountant-avcyhccxg-…vercel.app`, READY, commit `e8f5583`,
+~3 minutes after push). Post-deploy verification against **production**,
+same no-impersonation method as above:
+
+| Request (against `ai-accountant-erp.vercel.app`) | Before deploy | After deploy |
+|---|---|---|
+| `X-User-Id` only, non-member UUID | `403` (header accepted as identity) | **`401`** ✅ |
+| `X-User-Id` + forged `X-Organization-Id` | `403` | **`401`** ✅ |
+| no credentials | `401` | `401` (unchanged, correct) |
+| bogus bearer | `401` | `401` (unchanged, correct) |
+| `GET /api/health` | `200` JSON | `200` JSON `{"status":"ok","config_ok":true}` (no regression) |
+
+The header-auth bypass (audit category 1, Critical) is **closed in production**.
+Database hardening (071–074, applied earlier) plus the deployed app fixes close
+categories 1, 2, 4, 5, 6, 7, 12 and the anon cross-tenant report read. Migrations
+075 (idempotency keys) and 076 (atomic invoice posting) are applied to the live
+database with the application wiring committed on `main`.
+
+Cosmetic drift note: migrations 070, 075 and 076 each appear **twice** in the
+live migration history (file-prefixed name + apply-tool name). All three are
+idempotent (`if not exists` / `create or replace`), live schema matches the
+repository, and the duplication is bookkeeping-only — no corrective action
+required.
