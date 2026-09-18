@@ -14,7 +14,7 @@ from datetime import date, datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ===================================================================
@@ -217,6 +217,48 @@ class AgentResponse(BaseModel):
     confirmation_required: bool = False
     risk_level: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
+
+    @field_validator("options", mode="before")
+    @classmethod
+    def _coerce_options_to_strings(cls, value):
+        """Tolerate structured options instead of failing the whole request.
+
+        This field is ``List[str]`` and the frontend renders each entry as a
+        tappable chip (it calls ``opt.trim()``), but one producer shipped
+        ``{"value": ..., "label": ...}`` dicts.  Pydantic rejected them with
+
+            Input should be a valid string [type=string_type,
+            input_value={'value': 'yes', 'label': ...}]
+
+        which propagated out of ``execute()`` and ended the ENTIRE session as
+        FAILED — a cosmetic payload mismatch destroying a user's run, and the
+        user saw a raw Pydantic error.
+
+        Structured options are therefore flattened to their LABEL, which is
+        what the chip displays and what the answer-routing parsers expect
+        (e.g. "Create 'X' under 'Y'" -> CREATE).  Anything that cannot be
+        rendered as a string is dropped rather than crashing the response.
+
+        The upstream producer was fixed to emit strings, so this is a
+        backstop, not the primary contract.
+        """
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        coerced: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                coerced.append(item)
+                continue
+            if isinstance(item, dict):
+                label = item.get("label") or item.get("value")
+                if label is not None:
+                    coerced.append(str(label))
+                continue
+            if item is not None:
+                coerced.append(str(item))
+        return coerced
 
 
 class ClarificationResponse(BaseModel):

@@ -22,7 +22,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from pydantic import ValidationError
 
 from app.agent import _revenue_ledger_review_gate
 from app.models.schemas import AgentResponse, ExecutionStatus
@@ -153,13 +152,50 @@ class TestRevenueLedgerOptionsAreStrings:
         assert response.options is not None
         assert len(response.options) == 2
 
-    def test_dict_options_would_still_be_rejected(self):
-        """Guards the invariant itself, so a dict can never slip back in."""
-        with pytest.raises(ValidationError):
-            AgentResponse(
-                status=ExecutionStatus.AWAITING_CLARIFICATION,
-                options=[{"value": "yes", "label": "Create"}],
-            )
+    def test_structured_options_are_coerced_not_fatal(self):
+        """A structured payload must never end the run.
+
+        The producer is fixed to emit strings (tested above), but this is the
+        BACKSTOP: when a {value,label} dict reaches the model, the label is
+        used instead of raising.  Before the backstop this exact input raised
+        `ValidationError` out of execute() and failed the whole session — the
+        reported invoice crash.
+        """
+        response = AgentResponse(
+            status=ExecutionStatus.AWAITING_CLARIFICATION,
+            options=[{"value": "yes", "label": "Create 'Ovens Sales'"}],
+        )
+        assert response.options == ["Create 'Ovens Sales'"]
+
+    def test_structured_options_keep_the_answer_routing_contract(self):
+        """The coerced label must still drive the CREATE decision parser."""
+        response = AgentResponse(
+            status=ExecutionStatus.AWAITING_CLARIFICATION,
+            options=[
+                {"value": "yes", "label": "Create 'Ovens Sales' under Revenue"},
+                {"value": "no", "label": "Use the existing 'Revenue' account"},
+            ],
+        )
+        assert response.options is not None
+        assert response.options[0].lower().startswith(("yes", "create", "ok", "y"))
+
+    def test_unrenderable_options_are_dropped_not_fatal(self):
+        response = AgentResponse(
+            status=ExecutionStatus.AWAITING_CLARIFICATION,
+            options=["Keep me", None, {"no": "label-or-value"}],
+        )
+        assert response.options == ["Keep me"]
+
+    def test_plain_strings_are_untouched(self):
+        response = AgentResponse(
+            status=ExecutionStatus.AWAITING_CLARIFICATION,
+            options=["a", "b"],
+        )
+        assert response.options == ["a", "b"]
+
+    def test_missing_options_stay_none(self):
+        response = AgentResponse(status=ExecutionStatus.AWAITING_CLARIFICATION)
+        assert response.options is None
 
     @pytest.mark.asyncio
     async def test_labels_route_to_the_right_decision(self, review):
