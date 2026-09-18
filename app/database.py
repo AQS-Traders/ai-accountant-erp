@@ -180,17 +180,40 @@ async def update_one(
     *,
     row_id: uuid.UUID,
     data: Dict[str, Any],
+    organization_id: Optional[uuid.UUID] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Update a row by primary key and return the updated row."""
-    rows = (await _execute(_table(table_name).update(data).eq("id", str(row_id)))).data
+    """Update a row by primary key and return the updated row.
+
+    DEFENCE IN DEPTH: the backend uses the service-role key, so RLS does not
+    apply and a primary key alone would reach ANY tenant's row.  Pass
+    ``organization_id`` for tenant-owned tables to add it to the WHERE clause
+    as a second guard, so a foreign row id can never be updated even if a
+    future caller forgets the org-scoped read that normally precedes this.
+    """
+    q = _table(table_name).update(data).eq("id", str(row_id))
+    if organization_id is not None:
+        q = q.eq("organization_id", str(organization_id))
+    rows = (await _execute(q)).data
     return rows[0] if rows else None
 
 
 # ---- DELETE helpers -------------------------------------------------------
 
-async def delete_one(table_name: str, *, row_id: uuid.UUID) -> bool:
-    """Delete a row by primary key. Returns True if deleted."""
-    result = await _execute(_table(table_name).delete().eq("id", str(row_id)))
+async def delete_one(
+    table_name: str,
+    *,
+    row_id: uuid.UUID,
+    organization_id: Optional[uuid.UUID] = None,
+) -> bool:
+    """Delete a row by primary key. Returns True if deleted.
+
+    ``organization_id`` is an optional second guard for tenant-owned tables —
+    see :func:`update_one`.
+    """
+    q = _table(table_name).delete().eq("id", str(row_id))
+    if organization_id is not None:
+        q = q.eq("organization_id", str(organization_id))
+    result = await _execute(q)
     return bool(result.data)
 
 
