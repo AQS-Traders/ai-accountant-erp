@@ -575,8 +575,14 @@ async def create_confirmation(
     action_type: str,
     description: str,
     risk_level: str = "MEDIUM",
+    plan: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Create a confirmation record and set session to WAITING_FOR_USER."""
+    """Create a confirmation record and set session to WAITING_FOR_USER.
+
+    ``plan`` snapshots the exact tool calls the user is approving (migration
+    079).  The resumed run rebuilds THIS plan instead of re-planning, so
+    approval cannot be followed by different tools or a lost entity value.
+    """
     await set_session_phase(
         session_id, phase="AWAITING_CONFIRMATION", status="WAITING_FOR_USER"
     )
@@ -588,6 +594,7 @@ async def create_confirmation(
             "description": description,
             "risk_level": risk_level,
             "confirmation_required": True,
+            "plan": plan or [],
         },
     )
 

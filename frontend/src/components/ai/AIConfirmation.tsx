@@ -14,6 +14,9 @@ interface Props {
   transactionDate?: string;
   dateDefaulted?: boolean;
   onDecision: (approved: boolean, notes?: string) => void;
+  /** While the confirm request is in flight both buttons are disabled —
+   *  a double click must never fire a duplicate confirmation. */
+  disabled?: boolean;
 }
 
 const riskConfig: Record<string, { bg: string; text: string; label: string }> = {
@@ -30,6 +33,7 @@ export default function AIConfirmation({
   transactionDate,
   dateDefaulted,
   onDecision,
+  disabled = false,
 }: Props) {
   const risk = riskConfig[riskLevel || "LOW"] || riskConfig.LOW;
 
@@ -92,13 +96,15 @@ export default function AIConfirmation({
         <div className="flex gap-3 pt-2">
           <button
             onClick={() => onDecision(false)}
-            className="px-4 py-2.5 rounded-xl border border-border-default text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-muted transition-colors"
+            disabled={disabled}
+            className="px-4 py-2.5 rounded-xl border border-border-default text-sm font-medium text-text-secondary hover:text-text-primary hover:bg-bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Cancel
           </button>
           <button
             onClick={() => onDecision(true)}
-            className="px-5 py-2.5 rounded-xl bg-ai-600 text-white text-sm font-medium hover:bg-ai-700 focus:outline-none focus:ring-2 focus:ring-ai-500/30 transition"
+            disabled={disabled}
+            className="px-5 py-2.5 rounded-xl bg-ai-600 text-white text-sm font-medium hover:bg-ai-700 focus:outline-none focus:ring-2 focus:ring-ai-500/30 transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Confirm Action
           </button>

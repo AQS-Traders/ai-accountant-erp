@@ -34,6 +34,7 @@ from app.database import (
     create_execution_session,
     create_execution_step,
     create_tool_call as log_tool_call,
+    fetch_many,
     fetch_one,
     get_clarification_history,
     resolve_clarification,
@@ -1163,15 +1164,51 @@ async def _revenue_ledger_review_gate(
 
     if decision:
         # The user has spoken — apply it (creating the ledger when approved).
+        named = entities.get("revenue_account_name")
         account, created = await rls.apply_decision(
-            organization_id, label, decision
+            organization_id, label, decision, named_account=named
         )
         if account is not None:
             entities["revenue_account_id"] = str(account["id"])
             entities["revenue_account_resolved"] = (
                 "created" if created else "existing"
             )
-        return None
+            log.info(
+                "ledger_decision_normalized",
+                organization_id=str(organization_id),
+                decision=str(decision)[:20],
+                outcome="created" if created else "existing",
+                revenue_account_id=str(account["id"]),
+            )
+            return None
+        # The decision could not be applied (unknown or ambiguous account
+        # name, CREATE without a usable stream, ...).  ASK AGAIN with a
+        # targeted error — never let the sale proceed on an unreviewed
+        # revenue account, and never silently pick another account.
+        log.warning(
+            "ledger_decision_invalid",
+            organization_id=str(organization_id),
+            decision=str(decision)[:20],
+        )
+        general = await rls.find_general_revenue(organization_id)
+        parent_name = (general or {}).get("name") or rls.REVENUE_PARENT_NAME
+        proposed = rls.suggest_ledger_name(label) if label else "a new ledger"
+        rejected = str(named or decision).strip()[:80]
+        return {
+            "question": (
+                f"Revenue ledger check: your answer \"{rejected}\" could not "
+                f"be applied — it does not match exactly one existing revenue "
+                f"account in your chart. Create a dedicated ledger "
+                f"'{proposed}' under '{parent_name}' so this revenue is "
+                f"reported separately? Reply YES to create it, or reply with "
+                f"the exact name of an existing revenue account to use instead."
+            ),
+            # Plain strings — the frontend renders each as a tappable chip.
+            "options": [
+                f"Create '{proposed}' under {parent_name}",
+                f"Use the existing '{parent_name}' account",
+            ],
+        }
 
     if not await rls.needs_review(organization_id, item, decision):
         return None
@@ -1642,6 +1679,7 @@ async def execute(
     clarification_history: Optional[List[Dict[str, str]]] = None,
     confirmation_granted: bool = False,
     attachments: Optional[List[AttachmentRef]] = None,
+    approved_tool_calls: Optional[List[ToolCall]] = None,
 ) -> AgentResponse:
     """Main entry point — process a user message through the full agent lifecycle.
 
@@ -1652,6 +1690,11 @@ async def execute(
     ``confirmation_granted`` is set by ``resume_with_confirmation`` after the
     user approved the pending confirmation, so the PHASE 5 gate does not
     re-raise a new confirmation and execution can actually proceed.
+
+    ``approved_tool_calls`` is the plan snapshot the user approved (migration
+    079).  When present the tool selection is NOT re-derived — neither the
+    deterministic fast path nor the LLM planning call runs — so the executed
+    plan is exactly what the user reviewed.
     """
 
     session_id: Optional[uuid.UUID] = None
@@ -2222,8 +2265,19 @@ async def execute(
             execution_plan=execution_plan,
         )
         if review is not None:
-            await _update_status(
-                session_id, ExecutionStatus.AWAITING_CLARIFICATION
+            # PERSIST the question — the answer round must find a pending
+            # clarification row.  (Without this row the answer was silently
+            # discarded on resume and the SAME question was re-asked forever.)
+            clarification = await create_clarification(
+                session_id=session_id,
+                question=review["question"],
+                required_fields=["revenue_ledger_decision"],
+                options=review.get("options"),
+            )
+            log.info(
+                "ledger_question_created",
+                session_id=str(session_id),
+                clarification_id=str(clarification.get("id")),
             )
             await _log_step(session_id, "AWAITING_CLARIFICATION", {
                 "source": "revenue_ledger",
@@ -2238,11 +2292,20 @@ async def execute(
                 requires_user_input=True,
             )
 
-        deterministic_calls = await _deterministic_mutation_calls(
-            organization_id=organization_id,
-            execution_plan=execution_plan,
-            classification=classification,
-        )
+        if approved_tool_calls:
+            # The user approved THIS plan (snapshot stored with the
+            # confirmation): reuse it verbatim — no re-planning, no fresh
+            # LLM tool selection, no way to lose the approved entities.
+            deterministic_calls: Optional[List[ToolCall]] = list(approved_tool_calls)
+            await _log_step(session_id, "APPROVED_PLAN_REUSED", {
+                "tools": [tc.tool_name for tc in deterministic_calls],
+            })
+        else:
+            deterministic_calls = await _deterministic_mutation_calls(
+                organization_id=organization_id,
+                execution_plan=execution_plan,
+                classification=classification,
+            )
         _phase_elapsed("deterministic.done", fast=deterministic_calls is not None)
         llm_text = ""
         planned_tool_calls: List[ToolCall] = []
@@ -2354,6 +2417,15 @@ async def execute(
                     f" — {execution_plan.entity_name or ''}"
                 ),
                 risk_level="MEDIUM",
+                # Snapshot the EXACT plan the user is approving (migration
+                # 079): the resumed run reuses these tool calls verbatim.
+                plan=[
+                    {
+                        "tool_name": tc.tool_name,
+                        "arguments": dict(tc.arguments or {}),
+                    }
+                    for tc in planned_tool_calls
+                ],
             )
             await _log_step(session_id, "AWAITING_CONFIRMATION", {"confirmation_id": confirmation.get("id")})
             return AgentResponse(
@@ -2839,6 +2911,19 @@ async def execute(
                     )
                     if not vr.get("verified"):
                         verified = False
+                        log.warning(
+                            "journal_verification_failed",
+                            session_id=str(session_id),
+                            entry_id=str(entry["id"]),
+                            tool=tr.tool_name,
+                        )
+                    else:
+                        log.info(
+                            "journal_verified",
+                            session_id=str(session_id),
+                            entry_id=str(entry["id"]),
+                            tool=tr.tool_name,
+                        )
 
         # ---- PHASE 9: COMPLETED ------------------------------------------
         status = ExecutionStatus.COMPLETED if verified else ExecutionStatus.FAILED
@@ -2942,6 +3027,22 @@ async def execute(
         await flush_step_logs()
 
 
+def _session_is_owned(session: Optional[Dict[str, Any]], organization_id: uuid.UUID,
+                      user_id: uuid.UUID) -> bool:
+    """The session exists AND belongs to the caller's organisation and user."""
+    if not session:
+        return False
+    return (
+        str(session.get("organization_id") or "") == str(organization_id)
+        and str(session.get("user_id") or "") == str(user_id)
+    )
+
+
+def _session_is_pending(session: Dict[str, Any]) -> bool:
+    """The session is still parked on a user decision."""
+    return str(session.get("status") or "") == "WAITING_FOR_USER"
+
+
 async def resume_with_clarification(
     *,
     session_id: uuid.UUID,
@@ -2957,16 +3058,58 @@ async def resume_with_clarification(
     the just-answered question — is reloaded from the database and passed
     through ``execute(clarification_history=...)`` so the Planner folds
     every answered value into entity extraction and never re-asks it.
+
+    Authorisation + idempotency:
+      * the session must exist AND belong to the caller (organisation + user);
+      * an empty/whitespace answer is rejected — the clarification stays
+        pending with a targeted error;
+      * a non-WAITING session has already been answered (duplicate retry,
+        double click, replayed HTTP request) and returns a SAFE idempotent
+        response — it never re-enters execute() and can never create a
+        second ledger, invoice or journal.
     """
     session = await fetch_one("ai_execution_sessions", filters={"id": str(session_id)})
-    if not session:
+    if not _session_is_owned(session, organization_id, user_id):
+        # Not found / not yours — the same response for both, so an
+        # attacker learns nothing about other organisations' sessions.
         return AgentResponse(
             status=ExecutionStatus.FAILED,
             summary="Session not found.",
         )
+    answer = str(user_answer or "").strip()
+    if not answer:
+        # Empty or whitespace answers must not consume the pending
+        # question — the user is asked again with a targeted error.
+        return AgentResponse(
+            status=ExecutionStatus.AWAITING_CLARIFICATION,
+            execution_id=session_id,
+            question=str(session.get("user_request") or "").splitlines()[0]
+            if session.get("user_request") else "An answer is required.",
+            required_information=["revenue_ledger_decision"],
+            requires_user_input=True,
+            summary="An answer is required.",
+        )
+    if not _session_is_pending(session):
+        # Already answered/completed — the answer round already ran (or this
+        # request is a duplicate).  Replaying execute() here would re-plan and
+        # could create a SECOND mutation.  Return a safe idempotent response.
+        log.info(
+            "duplicate_resume_rejected",
+            session_id=str(session_id),
+            endpoint="clarify",
+            session_status=str(session.get("status"))[:20],
+        )
+        return await _idempotent_resume_response(session, endpoint="clarify")
 
-    # Record the user's answer on the pending clarification.
-    await resolve_clarification(session_id=session_id, user_response=user_answer)
+    log.info(
+        "ledger_answer_received",
+        session_id=str(session_id),
+        answer_length=len(answer),
+    )
+    # Record the user's answer on the pending clarification BEFORE resume —
+    # the answer must survive even if the resumed run later fails.
+    await resolve_clarification(session_id=session_id, user_response=answer)
+    log.info("clarification_resumed", session_id=str(session_id))
 
     # Rebuild the COMPLETE Q&A history for this conversation — the planner
     # merges each answer into the entity set, and Gemini receives both the
@@ -2984,6 +3127,55 @@ async def resume_with_clarification(
     )
 
 
+async def _idempotent_resume_response(
+    session: Dict[str, Any], *, endpoint: str
+) -> AgentResponse:
+    """A safe response for a duplicate resume of an already-resolved session.
+
+    ``ai_execution_results`` holds the outcome of the run that consumed this
+    session — replay it verbatim when available so the user sees the SAME
+    completed answer their first request produced.  Never re-execute: a
+    duplicate must not create a second ledger, invoice or journal.
+    """
+    session_id = uuid.UUID(str(session["id"]))
+    try:
+        stored = await fetch_one(
+            "ai_execution_results",
+            filters={"execution_session_id": str(session_id)},
+        )
+    except Exception:  # noqa: BLE001 — a read failure must not fabricate state
+        stored = None
+    if stored:
+        summary = str(stored.get("summary") or "")
+        if summary:
+            log.info(
+                "mutation_idempotency_hit",
+                session_id=str(session_id),
+                endpoint=endpoint,
+            )
+            return AgentResponse(
+                status=ExecutionStatus.COMPLETED,
+                execution_id=session_id,
+                summary=summary,
+            )
+    # Nothing replayable is stored: the previous run is gone (reaped, or it
+    # failed before writing a result).  Be honest — do NOT pretend success.
+    log.warning(
+        "mutation_idempotency_hit_no_result",
+        session_id=str(session_id),
+        endpoint=endpoint,
+    )
+    return AgentResponse(
+        status=ExecutionStatus.FAILED,
+        execution_id=session_id,
+        summary=(
+            "This request was already processed and its result is no longer "
+            "available. Please send the request again as a new message — "
+            "it was not duplicated."
+        ),
+    )
+
+
 async def resume_with_confirmation(
     *,
     session_id: uuid.UUID,
@@ -2992,9 +3184,45 @@ async def resume_with_confirmation(
     organization_id: uuid.UUID,
     auth: Optional[AuthContext] = None,
 ) -> AgentResponse:
-    """Resume a session after the user confirmed/rejected an action."""
+    """Resume a session after the user confirmed/rejected an action.
+
+    Authorisation + idempotency mirror ``resume_with_clarification``: the
+    session must belong to the caller and still be WAITING_FOR_USER; a
+    duplicate confirm returns the stored result without re-executing.
+    """
+    session = await fetch_one("ai_execution_sessions", filters={"id": str(session_id)})
+    if not _session_is_owned(session, organization_id, user_id):
+        return AgentResponse(
+            status=ExecutionStatus.FAILED,
+            summary="Session not found.",
+        )
+    if not _session_is_pending(session):
+        log.info(
+            "duplicate_resume_rejected",
+            session_id=str(session_id),
+            endpoint="confirm",
+            session_status=str(session.get("status"))[:20],
+        )
+        return await _idempotent_resume_response(session, endpoint="confirm")
+
+    # Read the PENDING confirmation row BEFORE resolving it: its plan
+    # snapshot (migration 079) is the plan the user actually approved.
+    confirmations = await fetch_many(
+        "ai_confirmations",
+        filters={"execution_session_id": str(session_id)},
+        order="created_at.asc",
+        limit=100,
+    )
+    pending_row = next(
+        (c for c in confirmations if c.get("user_confirmed") is None), None
+    )
     await resolve_confirmation(
         session_id=session_id, approved=approved, user_id=user_id
+    )
+    log.info(
+        "confirmation_resumed",
+        session_id=str(session_id),
+        approved=bool(approved),
     )
     if not approved:
         await _update_status(session_id, ExecutionStatus.REJECTED)
@@ -3003,14 +3231,29 @@ async def resume_with_confirmation(
             execution_id=session_id,
             summary="Action was rejected by the user.",
         )
+    # Reuse the APPROVED plan verbatim (migration 079): the resumed run
+    # cannot re-plan into different tools or lose the approved entities
+    # (e.g. the resolved revenue_account_id).
+    approved_calls: Optional[List[ToolCall]] = None
+    snapshot = (pending_row or {}).get("plan")
+    if isinstance(snapshot, list) and snapshot:
+        calls = [
+            ToolCall(
+                tool_name=str(entry["tool_name"]),
+                arguments=dict(entry.get("arguments") or {}),
+            )
+            for entry in snapshot
+            if isinstance(entry, dict) and entry.get("tool_name")
+        ]
+        if calls:
+            approved_calls = calls
+            log.info(
+                "approved_plan_reused",
+                session_id=str(session_id),
+                tools=[c.tool_name for c in calls],
+            )
     # If approved, continue execution — carrying any clarification history
     # from this session forward so answered questions stay answered.
-    session = await fetch_one("ai_execution_sessions", filters={"id": str(session_id)})
-    if not session:
-        return AgentResponse(
-            status=ExecutionStatus.FAILED,
-            summary="Session not found.",
-        )
     history = await get_clarification_history(session_id)
     return await execute(
         user_message=session.get("user_request", ""),
@@ -3022,6 +3265,7 @@ async def resume_with_confirmation(
         # The user just approved this action — skip the PHASE 5 gate so
         # execution proceeds instead of re-raising a new confirmation.
         confirmation_granted=True,
+        approved_tool_calls=approved_calls,
     )
 
 

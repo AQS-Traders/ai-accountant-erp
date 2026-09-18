@@ -205,6 +205,12 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
     amount = float(kw["amount"])
     transaction_date = kw.get("transaction_date") or date.today().isoformat()
     description = kw.get("description") or f"Cash sale {amount:,.2f}"
+    log.info(
+        "sale_tool_started",
+        organization_id=str(organization_id),
+        tool="record_cash_sale",
+        amount=amount,
+    )
 
     cash = await accounting_service.resolve_account(
         organization_id, account_name="Cash"
@@ -273,10 +279,22 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
                 "ledger, and the chart has more than one revenue account. "
                 "Ask the user which revenue account this sale belongs to."
             )
+        log.warning(
+            "sale_tool_failed",
+            organization_id=str(organization_id),
+            tool="record_cash_sale",
+            stage="revenue_resolution",
+        )
         return ToolResult(
             tool_name="record_cash_sale", success=False, error=ask
         )
     if not cash:
+        log.warning(
+            "sale_tool_failed",
+            organization_id=str(organization_id),
+            tool="record_cash_sale",
+            stage="cash_resolution",
+        )
         return ToolResult(
             tool_name="record_cash_sale",
             success=False,
@@ -325,6 +343,14 @@ async def _record_cash_sale(organization_id: uuid.UUID, **kw) -> ToolResult:
     result["revenue_account_source"] = revenue_source
     if stream:
         result["revenue_stream"] = stream
+    log.info(
+        "sale_tool_succeeded",
+        organization_id=str(organization_id),
+        tool="record_cash_sale",
+        journal_posted=bool(result.get("journal_posted")),
+        revenue_account_id=str(revenue.get("id")),
+        reviewed=bool(kw.get("revenue_account_id")),
+    )
     return ToolResult(tool_name="record_cash_sale", success=True, data=result)
 
 # ===================================================================

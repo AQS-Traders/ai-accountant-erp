@@ -206,6 +206,11 @@ async def route_tool_call(
                 state = (outcome or {}).get("state")
                 if state == "replay":
                     log.info("tool_router.idempotent_replay", tool=slug)
+                    log.info(
+                        "mutation_idempotency_hit",
+                        tool=slug,
+                        session_id=str(session_id) if session_id else None,
+                    )
                     replayed = outcome.get("result") or {}
                     return ToolResult(
                         tool_name=slug,
