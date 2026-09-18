@@ -102,8 +102,8 @@ database. Corrective changes go in **new forward migrations**, as 071–073 do.
 ## 4. Residual risks — inspected, and what happened to each
 
 Every residual risk from the previous report was re-inspected against the
-code. Four were real and are now **FIXED**; three were reclassified after
-measurement; two remain open by deliberate decision.
+code. Six were real and are now **FIXED**; three were reclassified after
+measurement; three remain open by deliberate decision.
 
 ### 4a. Fixed in this pass
 
@@ -113,6 +113,8 @@ measurement; two remain open by deliberate decision.
 | **A cosmetic payload mismatch destroyed a whole session** | `AgentResponse.options` is `List[str]`; a producer shipped `{value,label}` dicts, so construction raised `ValidationError` and the run ended FAILED with a **raw Pydantic error shown to the user**. | Fixed the producer *and* added a `field_validator` backstop that flattens structured options to their label (and drops unrenderable ones) instead of failing. 5 tests. |
 | **Unscoped read of `journal_lines`** | The repository's own audit flagged `get_journal_lines(entry_id)` as a latent hole. `journal_lines.organization_id` is `NOT NULL`, so it was cheaply fixable. | `get_journal_lines`/`accounting_service.get_lines` accept `organization_id` and filter on it. |
 | **`update_one`/`delete_one` scoped by primary key only** | The service-role client bypasses RLS, so a bare id reaches any tenant's row. The read layer *is* org-scoped and every write I traced follows an org-scoped read, but that is a single layer of defence. | Both helpers now accept an optional `organization_id` second guard; applied to the payment-allocation writes (`invoices`, `purchase_bills`), which take a client-supplied id. |
+| **No idempotency keys for financial mutations** | The only replay guard was a `record_cash_sale`-only, amount-based in-session check. Retries at any surface (browser / HTTP / AI provider / worker) could double-post, and amount-based suppression could wrongly drop a legitimate second identical sale. | Migration 075: `financial_operations` table keyed on `(organization_id, operation, idempotency_key)` with `claim_financial_operation` (request-hash mismatch rejection, result replay, stale-claim reclaim, FAILED retry) and `complete_financial_operation`; wired through `app/idempotency.py` at the tool-router choke point so every mutation path is protected by request keys. Both RPCs `service_role`-only. |
+| **No transaction atomicity for multi-write workflows** | Invoice → items → journal (and receipt/payment/bill → journal → linkage) were separate REST writes; a mid-sequence failure left a document without its lines or a document with no journal — the receipt/payment flows even swallowed journal failure into a warning. | Migrations 076/077/078: `post_invoice_atomic`, `create_payment_atomic`, `create_purchase_bill_atomic`, `create_receipt_atomic` — each creates the document, its lines and its journal in ONE transaction with tenant-ownership checks and balanced-journal rejection. Wired into `invoice_service`, `payment_service` and `purchase_service` (PR #3, CI green, 787 tests). All RPCs `service_role`-only. Journals are created DRAFT and still go through the app's validate/post flow. Residual: bills/payments/receipts *allocation + settlement* writes (allocate-to-invoice, `amount_paid` update) remain outside the RPC and are protected by idempotency (075) and org-scoped update guards, not full atomicity. |
 
 ### 4b. Reclassified after measurement (not defects)
 
@@ -126,8 +128,6 @@ measurement; two remain open by deliberate decision.
 
 | Gap | Evidence | Why still open |
 |---|---|---|
-| **No idempotency keys for financial mutations** | The only replay guard is `app/tool_router.py`, scoped to `slug == "record_cash_sale"` within one execution session and comparing `amount`. No financial table has an `idempotency_key` column. | Needs new schema plus every mutation path, and the retry surfaces are browser / HTTP / AI provider / worker. Two legitimately identical cash sales in one session could still be suppressed, i.e. a **missing financial record**. Half-building this would be worse than leaving it clearly recorded. |
-| **No transaction atomicity for multi-write workflows** | Repository's own `docs/CODEBASE_INTEGRATION_AUDIT.md:23`: invoice → items → journal are separate REST writes; no RPC wraps them. | Needs one PostgreSQL function per workflow. Large, and touching financial posting logic without staging is how you create the very corruption this is meant to prevent. |
 | **`ai.worker_jobs` has RLS enabled with no policy** | Adviser lint `0008` | Intentional (backend-only; service role bypasses RLS). |
 | **`account_template_for_business_type` has a mutable `search_path`** | Adviser lint `0011` | Low risk (not SECURITY DEFINER) but should be pinned. |
 | **Leaked-password protection disabled** | Adviser `auth_leaked_password_protection` | Supabase Auth portal setting, not code. |
@@ -262,11 +262,14 @@ same no-impersonation method as above:
 The header-auth bypass (audit category 1, Critical) is **closed in production**.
 Database hardening (071–074, applied earlier) plus the deployed app fixes close
 categories 1, 2, 4, 5, 6, 7, 12 and the anon cross-tenant report read. Migrations
-075 (idempotency keys) and 076 (atomic invoice posting) are applied to the live
-database with the application wiring committed on `main`.
+075 (idempotency keys), 076 (atomic invoice posting), 077 (atomic supplier
+payments + purchase bills) and 078 (atomic customer receipts) are applied to the
+live database. 076 was delivered with the main hardening merge (PR #1); 077/078
+and the service wiring for all four atomic RPCs were delivered via PR #3
+(`feat/atomic-payments`, CI green on the PR and on `main`, 787 tests passing).
 
-Cosmetic drift note: migrations 070, 075 and 076 each appear **twice** in the
-live migration history (file-prefixed name + apply-tool name). All three are
+Cosmetic drift note: migrations 070, 075, 076 and 078 each appear **twice** in the
+live migration history (file-prefixed name + apply-tool name). All four are
 idempotent (`if not exists` / `create or replace`), live schema matches the
 repository, and the duplication is bookkeeping-only — no corrective action
 required.
