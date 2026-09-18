@@ -84,7 +84,38 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
 
 ## Remaining work (in priority order)
 
-### A. Migration 080 - security advisories (NOT yet written - do this first)
+> **STATUS UPDATE (deployment completed this session — keep for history):**
+> A, B and C below are DONE. Final state:
+> * Migration `080_security_advisory_fixes` was **applied to the live project and
+>   verified by SQL query** (search_path pinned; `anon` denied on
+>   `create_organization`/`accept_my_team_invite`; `authenticated` intact; the
+>   template function still returns correct codes). The two WARN findings are
+>   gone; the remaining findings are documented as accepted in
+>   `docs/SECURITY_HARDENING_REVIEW.md` (advisor sweep section).
+> * Work Stream S1 (grounded LLM entity segregation) is **implemented**:
+>   `app/entity_segregation.py` + `prefill_entities` in `planner.plan()` +
+>   agent wiring (probe plan → one bounded grounded LLM call → re-plan).
+>   16 tests in `app/tests/test_entity_segregation.py`; full backend suite
+>   **839 passed**; frontend tsc/lint/vitest/build all exit 0.
+> * Deployment: branch pushed at `8bd0d84` → **PR #4 merged into `main`
+>   (merge commit `77c4dd6`)** → CI **success** on the merge → Vercel
+>   **production READY** (`dpl_7now2j9T7w2YMAWL1WKkqBceXeew`).
+>   Smoke: `ai-accountant-erp.vercel.app` `/`, `/api/health`, `/docs` → all 200.
+> * What is still open (the ONLY items):
+>   1. **Browser-level ledger smoke test** on production with the TEST account
+>      (in `E:\Qoder\.secrets\TEST_CREDENTIALS.local.txt`, never in chat):
+>      execute one sale that needs a dedicated revenue ledger, answer CREATE,
+>      verify exactly one ledger + one balanced journal via SQL, then confirm
+>      the question does not repeat. This needs an interactive authenticated
+>      session — do it through the UI or a scripted REST flow with the user's
+>      own session.
+>   2. **Manual dashboard step**: enable "Leaked password protection" in the
+>      Supabase Auth settings (cannot be delivered from code).
+>   3. Housekeeping: `tokens.env` contains a line named `GITHUB_PATX`
+>      (likely a typo of `GITHUB_PAT`); review/remove it. The raw PAT now
+>      loads from `.secrets\github_pat.raw` and takes precedence.
+
+### A. Migration 080 - security advisories (DONE - history below)
 
 From `supabase__get_advisors` (security), the actionable items:
 
