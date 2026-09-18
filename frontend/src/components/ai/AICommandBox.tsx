@@ -298,6 +298,7 @@ export default function AICommandBox() {
               options={response.options}
               questionOptions={response.question_options}
               onAnswer={handleClarify}
+              disabled={loading}
             />
           )}
           {response.status === ExecutionStatus.AWAITING_CONFIRMATION && (
@@ -312,6 +313,7 @@ export default function AICommandBox() {
               }
               dateDefaulted={Boolean(response.data?.date_defaulted)}
               onDecision={handleConfirm}
+              disabled={loading}
             />
           )}
           {response.status === ExecutionStatus.COMPLETED && (

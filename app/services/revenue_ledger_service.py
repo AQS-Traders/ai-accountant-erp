@@ -26,6 +26,7 @@ the user, not a coin toss.  Nothing in this module invents or renames accounts.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -285,54 +286,170 @@ async def create_stream_ledger(
     is returned with ``created=False``.  The account is created as a CHILD of the
     revenue parent, never as a new root, so the chart hierarchy and the
     reporting roll-up stay intact.
+
+    Concurrency-safe: two requests creating the same ledger race between the
+    lookup and the insert; the ``(organization_id, code)`` unique constraint
+    makes exactly one insert win, and the loser recovers by re-fetching the
+    winner instead of failing the sale or duplicating the account.
     """
     existing = await find_stream_ledger(organization_id, label)
     if existing is not None:
+        log.info(
+            "ledger_reused",
+            organization_id=str(organization_id),
+            account_id=str(existing.get("id")),
+            via="precheck",
+        )
         return existing, False
 
     parent = parent or await ensure_revenue_parent(organization_id)
     code = await _next_child_code(organization_id, parent)
-    created = await a_repo.create_account(
-        organization_id=organization_id,
-        code=code,
-        name=suggest_ledger_name(label),
-        account_type="REVENUE",
-        normal_balance="CREDIT",
-        parent_account_id=(
-            uuid.UUID(str(parent["id"])) if parent is not None else None
-        ),
-        description=f"Dedicated revenue ledger for {label}",
-    )
+    ledger_name = suggest_ledger_name(label)
     log.info(
-        "revenue_ledger.created",
+        "ledger_creation_started",
+        organization_id=str(organization_id),
+        ledger=ledger_name,
+        parent=(parent or {}).get("name"),
+    )
+    try:
+        created = await a_repo.create_account(
+            organization_id=organization_id,
+            code=code,
+            name=ledger_name,
+            account_type="REVENUE",
+            normal_balance="CREDIT",
+            parent_account_id=(
+                uuid.UUID(str(parent["id"])) if parent is not None else None
+            ),
+            description=f"Dedicated revenue ledger for {label}",
+        )
+    except Exception:
+        # A concurrent request created the same ledger between the lookup and
+        # the insert (unique-constraint loser).  Recover the winner.
+        recovered = await find_stream_ledger(organization_id, label)
+        if recovered is not None:
+            log.info(
+                "ledger_reused",
+                organization_id=str(organization_id),
+                account_id=str(recovered.get("id")),
+                via="constraint_recovery",
+            )
+            return recovered, False
+        log.warning(
+            "ledger_creation_failed",
+            organization_id=str(organization_id),
+            ledger=ledger_name,
+        )
+        raise
+    log.info(
+        "ledger_created",
+        organization_id=str(organization_id),
+        account_id=str(created.get("id")) if created else None,
         code=code,
-        name=suggest_ledger_name(label),
+        name=ledger_name,
         parent=parent.get("name") if parent else None,
     )
     return created, True
+
+
+def extract_account_name(answer: Any) -> str:
+    """Pull an account name out of a free-text review answer.
+
+    Handles every answer channel with ONE stable contract:
+      * the option-chip label  "Use the existing 'Operating Revenue' account"
+      * a quoted name          "Operating Revenue" / 'Chairs Sales'
+      * a bare typed name      "operating revenue"
+
+    Returns "" when nothing name-shaped can be extracted.
+    """
+    raw = str(answer or "").strip()
+    if not raw:
+        return ""
+    quoted = re.search(r"'([^']+)'", raw)
+    if quoted:
+        return quoted.group(1).strip()
+    # Unquoted: strip the common wrapper phrases around a bare name.
+    cleaned = re.sub(
+        r"^(?:please\s+)?(?:use|keep|book(?:\s+it)?|put\s+it|credit)\s+"
+        r"(?:the\s+)?existing\s+(?:revenue\s+)?account\s+",
+        "",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s+account(?:\s+instead)?[.!]?$", "", cleaned, flags=re.IGNORECASE
+    )
+    return cleaned.strip()
 
 
 async def apply_decision(
     organization_id: uuid.UUID,
     label: Optional[str],
     decision: Optional[str],
+    named_account: Optional[str] = None,
 ) -> tuple[Optional[Dict[str, Any]], bool]:
     """Turn the user's review answer into a concrete revenue account.
 
-    ``CREATE``       -> create/find the dedicated ledger for the stream.
-    ``USE_EXISTING`` -> the organisation's general revenue account.
+    ``CREATE``       -> create-or-reuse the dedicated ledger for the stream.
+    ``USE_EXISTING`` -> the account the user NAMED (exact, case-insensitive
+                        match inside this organisation) when they named one;
+                        otherwise the general revenue account.
     anything else    -> (None, False): the caller must keep asking, never guess.
+
+    An invalid or ambiguous named account NEVER falls back silently to another
+    account — the caller receives (None, False) and re-asks with a targeted
+    error.
     """
     choice = str(decision or "").strip().upper()
     if choice == "CREATE" and label:
         return await create_stream_ledger(organization_id, label)
     if choice in ("USE_EXISTING", "SKIP", "EXISTING"):
+        rows = await list_revenue_accounts(organization_id)
+        named = extract_account_name(named_account)
+        if named:
+            matches = [
+                r for r in rows if _norm(r.get("name")) == _norm(named)
+            ]
+            if len(matches) == 1:
+                log.info(
+                    "ledger_account_resolved",
+                    organization_id=str(organization_id),
+                    account_id=str(matches[0].get("id")),
+                    source="named_existing",
+                )
+                return matches[0], False
+            log.warning(
+                "ledger_decision_invalid",
+                organization_id=str(organization_id),
+                reason="ambiguous" if len(matches) > 1 else "unknown_account",
+                requested=named[:80],
+            )
+            return None, False
         general = await find_general_revenue(organization_id)
         if general is not None:
+            log.info(
+                "ledger_account_resolved",
+                organization_id=str(organization_id),
+                account_id=str(general.get("id")),
+                source="general_revenue",
+            )
             return general, False
-        rows = await list_revenue_accounts(organization_id)
         if len(rows) == 1:
+            # A single-revenue-account chart is unambiguous — crediting the
+            # only revenue account cannot misstate the books.
+            log.info(
+                "ledger_account_resolved",
+                organization_id=str(organization_id),
+                account_id=str(rows[0].get("id")),
+                source="only_revenue_account",
+            )
             return rows[0], False
+    log.warning(
+        "ledger_decision_invalid",
+        organization_id=str(organization_id),
+        reason="unrecognized_decision",
+        decision=str(choice)[:40],
+    )
     return None, False
 
 
@@ -369,4 +486,5 @@ __all__ = [
     "create_stream_ledger",
     "apply_decision",
     "needs_review",
+    "extract_account_name",
 ]

@@ -13,6 +13,9 @@ interface Props {
    *  switch below remains the offline fallback). */
   questionOptions?: QuestionOption[][];
   onAnswer: (answer: string) => void;
+  /** While a resume request is in flight every control is disabled —
+   *  a double click must never fire a duplicate answer. */
+  disabled?: boolean;
 }
 
 /** Split a consolidated questionnaire ("...:\n1. Q1\n2. Q2") into its
@@ -95,7 +98,13 @@ const isPaymentQ = (q: string) => /cash or on credit/i.test(q);
  *  requires the party box (a payable needs a party). */
 const isSettlementQ = (q: string) => /paid, or is it outstanding/i.test(q);
 
-export default function AIClarification({ question, options, questionOptions, onAnswer }: Props) {
+export default function AIClarification({
+  question,
+  options,
+  questionOptions,
+  onAnswer,
+  disabled = false,
+}: Props) {
   const subQuestions = splitQuestions(question);
   const multi = subQuestions.length >= 2;
   const [custom, setCustom] = useState("");
@@ -142,7 +151,7 @@ export default function AIClarification({ question, options, questionOptions, on
     : optionsForSubQuestion(question, 0, questionOptions);
 
   const sendMulti = () => {
-    if (!allAnswered) return;
+    if (!allAnswered || disabled) return;
     // Numbered so the backend routes every part to its own question.
     // Work Stream R2: when CREDIT is selected, the conditional party box
     // is appended as a trailing "N) supplier: X" part (the backend pairs
@@ -188,8 +197,9 @@ export default function AIClarification({ question, options, questionOptions, on
             <button
               key={opt.value}
               type="button"
+              disabled={disabled}
               onClick={() => onAnswer(opt.value)}
-              className="px-4 py-2 rounded-xl bg-bg-muted text-sm font-medium text-text-primary hover:bg-ai-50 hover:text-ai-700 border border-border-subtle hover:border-ai-200 transition-colors"
+              className="px-4 py-2 rounded-xl bg-bg-muted text-sm font-medium text-text-primary hover:bg-ai-50 hover:text-ai-700 border border-border-subtle hover:border-ai-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {opt.label}
             </button>
@@ -203,8 +213,9 @@ export default function AIClarification({ question, options, questionOptions, on
           {answerOptions.map((opt) => (
             <button
               key={opt}
+              disabled={disabled}
               onClick={() => onAnswer(opt)}
-              className="px-4 py-2 rounded-xl bg-bg-muted text-sm font-medium text-text-primary hover:bg-ai-50 hover:text-ai-700 border border-border-subtle hover:border-ai-200 transition-colors"
+              className="px-4 py-2 rounded-xl bg-bg-muted text-sm font-medium text-text-primary hover:bg-ai-50 hover:text-ai-700 border border-border-subtle hover:border-ai-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {opt}
             </button>
@@ -252,6 +263,7 @@ export default function AIClarification({ question, options, questionOptions, on
                 type="text"
                 value={answers[i] ?? ""}
                 autoFocus={i === 0 && !optionsForSubQuestion(q, i, questionOptions)}
+                disabled={disabled}
                 onChange={(e) =>
                   setAnswers((prev) =>
                     prev.map((a, j) => (j === i ? e.target.value : a))
@@ -261,7 +273,7 @@ export default function AIClarification({ question, options, questionOptions, on
                   if (e.key === "Enter" && allAnswered) sendMulti();
                 }}
                 placeholder="Type your answer here..."
-                className="w-full px-3 py-2 rounded-xl border border-border-default bg-bg-surface text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ai-500/30 focus:border-ai-500 transition"
+                className="w-full px-3 py-2 rounded-xl border border-border-default bg-bg-surface text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ai-500/30 focus:border-ai-500 transition disabled:bg-bg-muted disabled:text-text-muted disabled:cursor-not-allowed"
               />
               {/* Work Stream R2: the CONDITIONAL party box - only visible
                   once CREDIT is selected on the payment question (or
@@ -298,9 +310,9 @@ export default function AIClarification({ question, options, questionOptions, on
           <div className="flex justify-end">
             <button
               onClick={sendMulti}
-              disabled={!allAnswered}
+              disabled={!allAnswered || disabled}
               title={allAnswered ? undefined : "Answer every question to send"}
-              className="btn-3d btn-shine px-3 py-2 rounded-xl bg-gradient-to-b from-ai-500 to-ai-600 text-white hover:from-ai-400 hover:to-ai-600 transition flex items-center gap-1.5 text-sm font-semibold"
+              className="btn-3d btn-shine px-3 py-2 rounded-xl bg-gradient-to-b from-ai-500 to-ai-600 text-white hover:from-ai-400 hover:to-ai-600 transition flex items-center gap-1.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
               Send all answers
@@ -318,25 +330,26 @@ export default function AIClarification({ question, options, questionOptions, on
               type="text"
               value={custom}
               autoFocus
+              disabled={disabled}
               onChange={(e) => setCustom(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && custom.trim()) {
+                if (e.key === "Enter" && custom.trim() && !disabled) {
                   onAnswer(custom.trim());
                   setCustom("");
                 }
               }}
               placeholder="Type your answer here..."
-              className="flex-1 px-3 py-2 rounded-xl border border-border-default bg-bg-surface text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ai-500/30 focus:border-ai-500 transition"
+              className="flex-1 px-3 py-2 rounded-xl border border-border-default bg-bg-surface text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ai-500/30 focus:border-ai-500 transition disabled:bg-bg-muted disabled:text-text-muted disabled:cursor-not-allowed"
             />
             <button
               onClick={() => {
-                if (custom.trim()) {
+                if (custom.trim() && !disabled) {
                   onAnswer(custom.trim());
                   setCustom("");
                 }
               }}
-              disabled={!custom.trim()}
-              className="btn-3d px-3 py-2 rounded-xl bg-gradient-to-b from-ai-500 to-ai-600 text-white hover:from-ai-400 hover:to-ai-600 transition flex items-center gap-1.5 text-sm font-semibold"
+              disabled={!custom.trim() || disabled}
+              className="btn-3d px-3 py-2 rounded-xl bg-gradient-to-b from-ai-500 to-ai-600 text-white hover:from-ai-400 hover:to-ai-600 transition flex items-center gap-1.5 text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="w-4 h-4" />
               Send

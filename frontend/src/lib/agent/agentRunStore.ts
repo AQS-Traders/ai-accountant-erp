@@ -319,6 +319,10 @@ export const agentRunStore = {
 
   async clarify(answer: string) {
     if (!state.response?.execution_id) return;
+    // In-flight guard: a double click / repeated Enter / duplicate HTTP
+    // request must never fire a SECOND clarify — the first one already
+    // consumed the pending clarification, and a duplicate re-runs execute().
+    if (state.loading) return;
     set({ loading: true, error: "" });
     try {
       const res = await aiClarify({
@@ -335,6 +339,9 @@ export const agentRunStore = {
 
   async confirm(approved: boolean, notes?: string) {
     if (!state.response?.execution_id) return;
+    // In-flight guard: see clarify() — a duplicate confirm must never
+    // re-enter execution.
+    if (state.loading) return;
     set({ loading: true, error: "" });
     try {
       const res = await aiConfirm({

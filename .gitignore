@@ -7,6 +7,21 @@
 .env.*
 !.env.example
 
+# ---- Local credential drops (NEVER commit) ----
+# A token pasted into a file by hand, e.g. `github.txt` (Windows Explorer
+# "New text document" produces `github.txt.txt`).  These were previously NOT
+# ignored, so a routine `git add .` would have committed a live PAT.
+# `*token*.txt` also covers the Vercel_Token.txt described in the runbook.
+github.txt
+github.txt.txt
+*token*.txt
+*Token*.txt
+*tokens*.txt
+*secret*.txt
+*secrets*.txt
+*credential*.txt
+*credentials*.txt
+
 # ---- Vercel ----
 .vercel/
 

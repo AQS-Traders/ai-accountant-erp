@@ -197,6 +197,20 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=10)
     database_max_overflow: int = Field(default=20)
 
+    # ---- Entity segregation (grounded LLM gap-filler) ---------------------
+    # The deterministic regex extractor only matches fixed phrasings. When it
+    # leaves the party/item unstated, ONE extra grounded LLM call segregates
+    # the user's own sentence; every value must appear verbatim in the text
+    # or it is discarded (app/entity_segregation.py).
+    entity_llm_fallback: bool = Field(
+        default=True,
+        description="Enable the grounded LLM entity-segregation gap-filler.",
+    )
+    entity_llm_timeout_seconds: float = Field(
+        default=6.0,
+        description="Wall-clock cap for the grounded entity-segregation call.",
+    )
+
     # ---- Helpers ---------------------------------------------------------
     @property
     def cors_origin_list(self) -> List[str]:
