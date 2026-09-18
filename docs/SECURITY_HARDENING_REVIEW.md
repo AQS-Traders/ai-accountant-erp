@@ -171,3 +171,76 @@ measurement; two remain open by deliberate decision.
 | Worker lease ownership | `finish_worker_job(<job>, 'impostor-worker', …)` → `42501: job … is not held by worker impostor-worker` |
 | Stale sessions | `ai.reap_stale_sessions()` reaped 1; `WAITING_FOR_USER` 5→4, `CANCELLED` 4→5 |
 | Financial data | **Not touched** by any migration: no invoice/journal/payment rows created, altered or deleted |
+
+---
+
+## 7. Deployment and credential findings (2026-09-18)
+
+### The GitHub push failure was NOT an expired token
+
+An earlier report concluded the PAT was expired. **That was wrong.** Diagnosis:
+
+| Check | Result |
+|---|---|
+| `GET https://api.github.com/user` | **200 OK**, `login=zameerchattha0-ops` |
+| Repo permissions | `push_permission=true`, `admin=true` |
+| `x-oauth-scopes` header | empty → a **fine-grained** PAT (fine-grained tokens send no scopes header) |
+| Keys in `.secrets/tokens.env` | `GITHUB_PAT` set (len 93); `GITHUB_USER` present but **blank** |
+
+The real cause: a **fine-grained** PAT must be paired with the account's real
+GitHub username as the HTTPS username. `x-access-token` — which is correct for
+classic PATs and App installation tokens, and is a common piece of advice for
+this exact error — is **rejected** for fine-grained PATs with
+`Invalid username or token. Password authentication is not supported for Git
+operations.` The username is now derived from the API rather than hardcoded.
+
+Two secondary traps were also hit and are worth recording:
+
+* `git config --local credential.helper <ours>` **appends** to the helper list
+  rather than replacing it, so Git Credential Manager still ran and blocked the
+  push on an interactive browser prompt. `-c credential.helper=` (empty) must be
+  passed first to reset the list.
+* Therefore `credential.helper` alone is not safe to script on this machine.
+
+### Token permissions actually granted vs needed
+
+| Need | Status |
+|---|---|
+| Push commits to `security/erp-hardening` | ✅ **works** |
+| `workflow` scope (create/update `.github/workflows/*`) | ❌ missing → `refusing to allow a Personal Access Token to create or update workflow .github/workflows/ci.yml without workflow scope` |
+| Create a pull request | ❌ missing → `403 Resource not accessible by personal access token` |
+
+`.github/workflows/ci.yml` is therefore **held back** and not committed; the file
+remains on disk and the pre-strip history is preserved on the local branch
+`backup/full-with-ci` (`e2b3e86`). With no CI file, every other change pushes
+cleanly.
+
+### Vercel
+
+* `APP_ENV` is already `production` (targets production, preview, development).
+* A preview was built for the branch: `ai-accountant-m706ztq1g-zameerchattha0-ops.vercel.app` (state READY).
+* **`/api/*` routing differs between production and preview.** Production
+  `https://ai-accountant-erp.vercel.app/api/health` returns **JSON**
+  (`{"status":"ok","version":"1.0.0","config_ok":true}`), but the same path on
+  the preview host returns **Next.js HTML**. So an API smoke test against a
+  preview URL does not exercise the FastAPI backend and must not be read as
+  proof about backend behaviour. (Initial smoke results were misinterpreted this
+  way and corrected.)
+
+### Live proof that the header-auth bypass is real
+
+Executed against **production** using a UUID belonging to no one (no
+impersonation attempted — the identity is a random UUID that exists nowhere):
+
+| Request | Response | Reading |
+|---|---|---|
+| no credentials | `401` | the genuine "unauthenticated" response |
+| `X-User-Id` only, non-member UUID | **`403`** | the header was **accepted as an identity** and processed to the membership lookup |
+| `X-User-Id` + forged `X-Organization-Id` | **`403`** | org header read too |
+| bogus bearer | `401` | correctly rejected |
+
+A header-only request is treated as *authenticated* (403 "not a member") rather
+than *unauthenticated* (401). With a real member's UUID — trivially obtainable
+from `organization_members` through the client, which is readable by
+co-members — the old code grants that user's full access. After deploying the
+fix, the same request becomes `401`.
