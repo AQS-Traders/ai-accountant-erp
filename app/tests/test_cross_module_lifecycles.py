@@ -359,26 +359,27 @@ class TestReceivableSettlementLifecycle:
     async def test_receipt_is_source_tied_and_allocated(self):
         """A receipt against an invoice: posted journal tied to the
         receipt id, allocation row, invoice settlement — all three."""
-        receipt_row = {"id": RECEIPT_ID, "amount": 50000.0}
+        async def _rpc(name, *, params=None):
+            assert name == "create_receipt_atomic", name
+            return {
+                "receipt": {"id": RECEIPT_ID, "amount": 50000.0},
+                "journal_entry_id": JOURNAL_ID,
+            }
+
+        rpc = AsyncMock(side_effect=_rpc)
         with patch.object(
-            payment_service.repo, "create_receipt",
-            new=AsyncMock(return_value=receipt_row),
-        ) as create_r, patch.object(
-            payment_service, "_resolve_bank_gl_account",
+            payment_service, "call_rpc", new=rpc,
+        ), patch.object(
+            payment_service, "_resolve_settlement_gl",
             new=AsyncMock(return_value=uuid.UUID(CUSTOMER_ID)),
         ), patch.object(
-            payment_service, "_resolve_customer_receivable",
-            new=AsyncMock(return_value=uuid.UUID(SUPPLIER_ID)),
-        ), patch.object(
-            payment_service.engine, "record_customer_receipt",
-            new=AsyncMock(return_value=_posted_journal()),
-        ) as engine_r, patch(
-            "app.services.accounting_service.validate_journal", new=AsyncMock()
+            payment_service, "_resolve_receipt_credit_account",
+            new=AsyncMock(return_value=(uuid.UUID(SUPPLIER_ID), None)),
         ), patch(
+            "app.services.accounting_service.validate_journal", new=AsyncMock()
+        ) as validate_j, patch(
             "app.services.accounting_service.post_journal", new=AsyncMock()
         ) as post_j, patch.object(
-            payment_service.repo, "link_journal_to_receipt", new=AsyncMock(),
-        ) as link_j, patch.object(
             payment_service.repo, "create_receipt_allocation",
             new=AsyncMock(return_value={"id": "alloc-1"}),
         ) as alloc, patch.object(
@@ -390,15 +391,16 @@ class TestReceivableSettlementLifecycle:
                 amount=50000.0,
                 invoice_id=uuid.UUID(INVOICE_ID),
             )
-        create_r.assert_awaited_once()
-        # Journal is source-tied to THIS receipt, correct party + amount
-        engine_r.assert_awaited_once()
-        jk = engine_r.await_args.kwargs
-        assert str(jk["source_id"]) == RECEIPT_ID
-        assert str(jk["customer_id"]) == CUSTOMER_ID
-        assert jk["amount"] == 50000.0
-        post_j.assert_awaited_once()
-        link_j.assert_awaited_once()
+        rpc.assert_awaited_once()
+        params = rpc.await_args.kwargs["params"]
+        # the journal goes in WITH the receipt — one transaction, balanced
+        lines = params["p_journal"]["lines"]
+        assert lines[0]["debit"] == 50000.0
+        assert lines[1]["credit"] == 50000.0
+        assert lines[1]["customer_id"] == CUSTOMER_ID
+        # the DRAFT entry the RPC linked is validate+posted
+        validate_j.assert_awaited_once_with(entry_id=uuid.UUID(JOURNAL_ID))
+        post_j.assert_awaited_once_with(entry_id=uuid.UUID(JOURNAL_ID))
         # Allocation row + settlement against the SOURCE invoice
         alloc.assert_awaited_once()
         ak = alloc.await_args.kwargs
@@ -411,25 +413,26 @@ class TestReceivableSettlementLifecycle:
     async def test_receipt_without_invoice_still_posts_journal(self):
         """A receipt with no allocation target still records cash
         (unapplied receipt) — but never invents an invoice."""
+        async def _rpc(name, *, params=None):
+            assert name == "create_receipt_atomic", name
+            return {
+                "receipt": {"id": RECEIPT_ID, "amount": 20000.0},
+                "journal_entry_id": JOURNAL_ID,
+            }
+
         with patch.object(
-            payment_service.repo, "create_receipt",
-            new=AsyncMock(return_value={"id": RECEIPT_ID, "amount": 20000.0}),
+            payment_service, "call_rpc", new=AsyncMock(side_effect=_rpc),
         ), patch.object(
-            payment_service, "_resolve_bank_gl_account",
+            payment_service, "_resolve_settlement_gl",
             new=AsyncMock(return_value=uuid.UUID(CUSTOMER_ID)),
         ), patch.object(
-            payment_service, "_resolve_customer_receivable",
-            new=AsyncMock(return_value=uuid.UUID(SUPPLIER_ID)),
-        ), patch.object(
-            payment_service.engine, "record_customer_receipt",
-            new=AsyncMock(return_value=_posted_journal()),
-        ) as engine_r, patch(
+            payment_service, "_resolve_receipt_credit_account",
+            new=AsyncMock(return_value=(uuid.UUID(SUPPLIER_ID), None)),
+        ), patch(
             "app.services.accounting_service.validate_journal", new=AsyncMock()
         ), patch(
             "app.services.accounting_service.post_journal", new=AsyncMock()
-        ), patch.object(
-            payment_service.repo, "link_journal_to_receipt", new=AsyncMock(),
-        ), patch.object(
+        ) as post_j, patch.object(
             payment_service.repo, "create_receipt_allocation", new=AsyncMock()
         ) as alloc:
             await payment_service.record_customer_receipt(
@@ -437,7 +440,7 @@ class TestReceivableSettlementLifecycle:
                 customer_id=uuid.UUID(CUSTOMER_ID),
                 amount=20000.0,
             )
-        engine_r.assert_awaited_once()
+        post_j.assert_awaited_once()
         alloc.assert_not_awaited()
 
 
@@ -484,25 +487,27 @@ class TestPayableSettlementLifecycle:
 
     @pytest.mark.asyncio
     async def test_supplier_payment_is_source_tied_and_allocated(self):
+        async def _rpc(name, *, params=None):
+            assert name == "create_payment_atomic", name
+            return {
+                "payment": {"id": PAYMENT_ID, "amount": 90000.0},
+                "journal_entry_id": JOURNAL_ID,
+            }
+
+        rpc = AsyncMock(side_effect=_rpc)
         with patch.object(
-            payment_service.repo, "create_payment",
-            new=AsyncMock(return_value={"id": PAYMENT_ID, "amount": 90000.0}),
+            payment_service, "call_rpc", new=rpc,
         ), patch.object(
-            payment_service, "_resolve_bank_gl_account",
+            payment_service, "_resolve_settlement_gl",
             new=AsyncMock(return_value=uuid.UUID(CUSTOMER_ID)),
         ), patch.object(
-            payment_service, "_resolve_supplier_payable",
-            new=AsyncMock(return_value=uuid.UUID(SUPPLIER_ID)),
-        ), patch.object(
-            payment_service.engine, "record_supplier_payment",
-            new=AsyncMock(return_value=_posted_journal()),
-        ) as engine_p, patch(
+            payment_service, "_resolve_payment_debit_account",
+            new=AsyncMock(return_value=(uuid.UUID(SUPPLIER_ID), None)),
+        ), patch(
             "app.services.accounting_service.validate_journal", new=AsyncMock()
         ), patch(
             "app.services.accounting_service.post_journal", new=AsyncMock()
         ) as post_j, patch.object(
-            payment_service.repo, "link_journal_to_payment", new=AsyncMock(),
-        ) as link_j, patch.object(
             payment_service.repo, "create_payment_allocation",
             new=AsyncMock(return_value={"id": "alloc-2"}),
         ) as alloc, patch.object(
@@ -514,14 +519,16 @@ class TestPayableSettlementLifecycle:
                 amount=90000.0,
                 bill_id=uuid.UUID(INVOICE_ID),
             )
-        # Journal source-tied to THIS payment, correct party + amount
-        engine_p.assert_awaited_once()
-        jk = engine_p.await_args.kwargs
-        assert str(jk["source_id"]) == PAYMENT_ID
-        assert str(jk["supplier_id"]) == SUPPLIER_ID
-        assert jk["amount"] == 90000.0
-        post_j.assert_awaited_once()
-        link_j.assert_awaited_once()
+        rpc.assert_awaited_once()
+        params = rpc.await_args.kwargs["params"]
+        # DB contract: supplier payments are OUTFLOW, source-tied to the supplier
+        assert params["p_payment"]["direction"] == "OUTFLOW"
+        assert params["p_payment"]["supplier_id"] == SUPPLIER_ID
+        lines = params["p_journal"]["lines"]
+        assert lines[0]["debit"] == 90000.0
+        assert lines[0]["supplier_id"] == SUPPLIER_ID
+        assert lines[1]["credit"] == 90000.0
+        post_j.assert_awaited_once_with(entry_id=uuid.UUID(JOURNAL_ID))
         alloc.assert_awaited_once()
         ak = alloc.await_args.kwargs
         assert str(ak["bill_id"]) == INVOICE_ID

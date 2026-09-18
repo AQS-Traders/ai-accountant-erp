@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 
 from app.repositories import purchase_repository as repo
+from app.database import call_rpc
 from app.services import supplier_service
 from app.services.item_validation import validate_document_items
 
@@ -65,31 +66,46 @@ async def create_purchase_bill(
     if total == 0:
         total = subtotal + tax_total - discount_total
 
-    bill = await repo.create_purchase_bill(
-        organization_id=organization_id,
-        supplier_id=supplier_id,
-        bill_date=b_date,
-        due_date=due_date,
-        currency_code=currency_code,
-        subtotal=subtotal,
-        tax_total=tax_total,
-        discount_total=discount_total,
-        total=total,
-        payment_terms_days=payment_terms_days,
-        supplier_invoice_ref=supplier_invoice_ref,
-        notes=notes,
-        created_by=created_by,
-    )
-
-    # PARITY: persist line items through the repository (identical row shape
-    # to the manual form's writes).
-    if normalized_items:
-        saved_items = await repo.add_purchase_bill_items(
-            organization_id, bill_id=uuid.UUID(str(bill["id"])),
-            items=normalized_items,
-        )
-        bill["items"] = saved_items
-        bill["item_count"] = len(saved_items)
+    # ATOMIC POSTING (migration 077): the bill, its line items and (optionally)
+    # a journal go into ONE database transaction, so a failure can never leave
+    # a document without its lines — the partial state the previous two-write
+    # sequence allowed. All arithmetic and validation above is unchanged; the
+    # bill is created without a journal here (journal attachment on posting /
+    # settlement is unchanged behaviour).
+    header = {
+        "supplier_id": str(supplier_id),
+        "bill_date": b_date,
+        "due_date": due_date,
+        "currency_code": currency_code,
+        "subtotal": subtotal,
+        "discount_total": discount_total,
+        "tax_total": tax_total,
+        "total": total,
+        "payment_terms_days": payment_terms_days,
+        "supplier_invoice_ref": supplier_invoice_ref,
+        "notes": notes,
+        "created_by": str(created_by) if created_by else None,
+    }
+    items_payload = [
+        {
+            k: (str(v) if isinstance(v, uuid.UUID) else v)
+            for k, v in item.items()
+        }
+        for item in normalized_items
+    ]
+    outcome = await call_rpc(
+        "create_purchase_bill_atomic",
+        params={
+            "p_organization_id": str(organization_id),
+            "p_header": header,
+            "p_items": items_payload,
+            "p_journal": None,
+        },
+    ) or {}
+    bill = outcome.get("bill") or {}
+    if outcome.get("items"):
+        bill["items"] = outcome["items"]
+        bill["item_count"] = outcome.get("item_count", 0)
 
     log.info(
         "purchase.bill_created",

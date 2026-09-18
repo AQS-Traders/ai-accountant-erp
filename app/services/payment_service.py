@@ -21,7 +21,7 @@ from app.repositories import payment_repository as repo
 from app.repositories import bank_repository as bank_repo
 from app.repositories import invoice_repository as inv_repo
 from app.repositories import purchase_repository as pur_repo
-from app.database import fetch_many, update_one
+from app.database import fetch_many, update_one, call_rpc
 from app.services import accounting_service
 from app import accounting_engine as engine
 
@@ -340,64 +340,76 @@ async def record_customer_receipt(
     """
     r_date = receipt_date or date.today().isoformat()
 
-    # 1. Create receipt row
-    receipt = await repo.create_receipt(
-        organization_id=organization_id,
-        receipt_date=r_date,
-        customer_id=customer_id,
-        amount=amount,
+    # ATOMIC POSTING (migration 078): the receipt, its journal entry and its
+    # lines commit in ONE database transaction — a receipt can never exist
+    # without its journal (the partial state the previous create-then-journal
+    # sequence allowed, where a journal failure was swallowed into a warning).
+    # Arithmetic/validation stays here; only the writes are transactional.
+    money_gl = await _resolve_settlement_gl(
+        organization_id,
         payment_method=payment_method,
-        currency_code=currency_code,
         bank_account_id=bank_account_id,
         cash_account_id=cash_account_id,
-        reference=reference,
-        notes=notes,
-        created_by=created_by,
     )
+    credit_gl, credit_warning = await _resolve_receipt_credit_account(
+        organization_id, customer_id, transaction_nature
+    )
+
+    entry_desc = f"Receipt from customer — {reference or 'customer receipt'}"
+    outcome = await call_rpc(
+        "create_receipt_atomic",
+        params={
+            "p_organization_id": str(organization_id),
+            "p_header": {
+                "receipt_date": r_date,
+                "customer_id": str(customer_id),
+                "amount": amount,
+                "payment_method": payment_method,
+                "currency_code": currency_code,
+                "bank_account_id": str(bank_account_id) if bank_account_id else None,
+                "cash_account_id": str(cash_account_id) if cash_account_id else None,
+                "reference": reference,
+                "notes": notes,
+                "created_by": str(created_by) if created_by else None,
+            },
+            "p_journal": {
+                "transaction_date": r_date,
+                "description": entry_desc,
+                "reference": reference,
+                "currency_code": currency_code,
+                "lines": [
+                    {
+                        "account_id": str(money_gl),
+                        "description": f"Receipt — {entry_desc}",
+                        "debit": amount,
+                        "credit": 0,
+                        "customer_id": str(customer_id),
+                    },
+                    {
+                        "account_id": str(credit_gl),
+                        "description": f"Receivable settled — {entry_desc}",
+                        "debit": 0,
+                        "credit": amount,
+                        "customer_id": str(customer_id),
+                    },
+                ],
+            },
+        },
+    ) or {}
+    receipt = outcome.get("receipt") or {}
     receipt_id = uuid.UUID(receipt["id"])
 
-    # 2. Auto-journal: Dr Cash-or-Bank GL, Cr nature-aware party-side GL
-    try:
-        money_gl = await _resolve_settlement_gl(
-            organization_id,
-            payment_method=payment_method,
-            bank_account_id=bank_account_id,
-            cash_account_id=cash_account_id,
-        )
-        credit_gl, credit_warning = await _resolve_receipt_credit_account(
-            organization_id, customer_id, transaction_nature
-        )
+    # The RPC created the entry DRAFT and linked it; validate + post so
+    # ledger and cash-flow stay current (same as the pre-atomic flow).
+    entry_id = uuid.UUID(outcome["journal_entry_id"])
+    await accounting_service.validate_journal(entry_id=entry_id)
+    await accounting_service.post_journal(entry_id=entry_id)
 
-        journal = await engine.record_customer_receipt(
-            organization_id=organization_id,
-            customer_id=customer_id,
-            receivable_account_id=credit_gl,
-            bank_account_id=money_gl,
-            amount=amount,
-            transaction_date=r_date,
-            description=f"Receipt from customer — {reference or receipt_id}",
-            source_id=receipt_id,
-        )
-        if journal.get("entry"):
-            entry_id = uuid.UUID(journal["entry"]["id"])
-            # Auto-validate and post so ledger + cash-flow stay current
-            await accounting_service.validate_journal(entry_id=entry_id)
-            await accounting_service.post_journal(entry_id=entry_id)
-            await repo.link_journal_to_receipt(
-                receipt_id=receipt_id, journal_entry_id=entry_id,
-            )
-        if credit_warning:
-            # R4.3: a nature-driven fallback is DISCLOSED, never silent.
-            receipt["journal_warning"] = (
-                f"{receipt.get('journal_warning', '')} {credit_warning}".strip()
-                if receipt.get("journal_warning")
-                else credit_warning
-            )
-    except Exception as exc:
-        log.warning("payment.receipt_journal_failed", receipt_id=str(receipt_id), error=str(exc))
-        receipt["journal_warning"] = f"Journal creation failed: {exc}"
+    if credit_warning:
+        # R4.3: a nature-driven fallback is DISCLOSED, never silent.
+        receipt["journal_warning"] = credit_warning
 
-    # 3. Allocate against invoice if provided
+    # Allocate against invoice if provided
     if invoice_id:
         await repo.create_receipt_allocation(
             organization_id=organization_id,
@@ -441,67 +453,77 @@ async def record_supplier_payment(
     """
     p_date = payment_date or date.today().isoformat()
 
-    # 1. Create payment row
+    # ATOMIC POSTING (migration 077): the payment, its journal entry and its
+    # lines commit in ONE database transaction — a payment can never exist
+    # without its journal (the partial state the previous create-then-journal
+    # sequence allowed, where a journal failure was swallowed into a warning).
     # NOTE: DB enum payment_direction = {INFLOW, OUTFLOW} (migration 034).
     # The database contract is authoritative — supplier payments are OUTFLOW.
-    payment = await repo.create_payment(
-        organization_id=organization_id,
-        payment_date=p_date,
-        supplier_id=supplier_id,
-        amount=amount,
-        direction="OUTFLOW",
+    money_gl = await _resolve_settlement_gl(
+        organization_id,
         payment_method=payment_method,
-        currency_code=currency_code,
         bank_account_id=bank_account_id,
         cash_account_id=cash_account_id,
-        reference=reference,
-        notes=notes,
-        created_by=created_by,
     )
+    debit_gl, debit_warning = await _resolve_payment_debit_account(
+        organization_id, supplier_id, transaction_nature
+    )
+
+    entry_desc = f"Payment to supplier — {reference or 'supplier payment'}"
+    outcome = await call_rpc(
+        "create_payment_atomic",
+        params={
+            "p_organization_id": str(organization_id),
+            "p_payment": {
+                "payment_date": p_date,
+                "supplier_id": str(supplier_id),
+                "direction": "OUTFLOW",
+                "payment_method": payment_method,
+                "currency_code": currency_code,
+                "bank_account_id": str(bank_account_id) if bank_account_id else None,
+                "cash_account_id": str(cash_account_id) if cash_account_id else None,
+                "amount": amount,
+                "reference": reference,
+                "notes": notes,
+                "created_by": str(created_by) if created_by else None,
+            },
+            "p_journal": {
+                "transaction_date": p_date,
+                "description": entry_desc,
+                "reference": reference,
+                "currency_code": currency_code,
+                "lines": [
+                    {
+                        "account_id": str(debit_gl),
+                        "description": f"Payable settled — {entry_desc}",
+                        "debit": amount,
+                        "credit": 0,
+                        "supplier_id": str(supplier_id),
+                    },
+                    {
+                        "account_id": str(money_gl),
+                        "description": f"Payment — {entry_desc}",
+                        "debit": 0,
+                        "credit": amount,
+                    },
+                ],
+            },
+        },
+    ) or {}
+    payment = outcome.get("payment") or {}
     payment_id = uuid.UUID(payment["id"])
 
-    # 2. Auto-journal: Dr nature-aware party-side GL, Cr Cash-or-Bank GL
-    try:
-        money_gl = await _resolve_settlement_gl(
-            organization_id,
-            payment_method=payment_method,
-            bank_account_id=bank_account_id,
-            cash_account_id=cash_account_id,
-        )
-        debit_gl, debit_warning = await _resolve_payment_debit_account(
-            organization_id, supplier_id, transaction_nature
-        )
+    # The RPC created the entry DRAFT and linked it; validate + post so
+    # ledger and cash-flow stay current (same as the pre-atomic flow).
+    entry_id = uuid.UUID(outcome["journal_entry_id"])
+    await accounting_service.validate_journal(entry_id=entry_id)
+    await accounting_service.post_journal(entry_id=entry_id)
 
-        journal = await engine.record_supplier_payment(
-            organization_id=organization_id,
-            supplier_id=supplier_id,
-            payable_account_id=debit_gl,
-            bank_account_id=money_gl,
-            amount=amount,
-            transaction_date=p_date,
-            description=f"Payment to supplier — {reference or payment_id}",
-            source_id=payment_id,
-        )
-        if journal.get("entry"):
-            entry_id = uuid.UUID(journal["entry"]["id"])
-            # Auto-validate and post so ledger + cash-flow stay current
-            await accounting_service.validate_journal(entry_id=entry_id)
-            await accounting_service.post_journal(entry_id=entry_id)
-            await repo.link_journal_to_payment(
-                payment_id=payment_id, journal_entry_id=entry_id,
-            )
-        if debit_warning:
-            # R4.3: a nature-driven fallback is DISCLOSED, never silent.
-            payment["journal_warning"] = (
-                f"{payment.get('journal_warning', '')} {debit_warning}".strip()
-                if payment.get("journal_warning")
-                else debit_warning
-            )
-    except Exception as exc:
-        log.warning("payment.supplier_journal_failed", payment_id=str(payment_id), error=str(exc))
-        payment["journal_warning"] = f"Journal creation failed: {exc}"
+    if debit_warning:
+        # R4.3: a nature-driven fallback is DISCLOSED, never silent.
+        payment["journal_warning"] = debit_warning
 
-    # 3. Allocate against bill if provided
+    # Allocate against bill if provided
     if bill_id:
         await repo.create_payment_allocation(
             organization_id=organization_id,

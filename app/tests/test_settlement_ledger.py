@@ -86,20 +86,27 @@ class TestSettlementChannelRouting:
     async def test_full_cash_receipt_journals_the_cash_ledger(self):
         """End-to-end service call: a CASH receipt debits the CASH GL and
         credits the receivable — the bank GL is never touched."""
+        async def _rpc(name, *, params=None):
+            assert name == "create_receipt_atomic", name
+            return {
+                "receipt": {"id": str(uuid.UUID(int=99)), "amount": 5000.0},
+                "journal_entry_id": str(uuid.UUID(int=98)),
+            }
+
+        rpc = AsyncMock(side_effect=_rpc)
         with patch.object(
-            payment_service.repo, "create_receipt",
-            new=AsyncMock(return_value={"id": str(uuid.UUID(int=99)),
-                                        "amount": 5000.0}),
+            payment_service, "call_rpc", new=rpc,
         ), patch.object(
             payment_service, "_resolve_settlement_gl",
             new=AsyncMock(return_value=CASH_GL),
         ) as settle, patch.object(
             payment_service, "_resolve_receipt_credit_account",
             new=AsyncMock(return_value=(RECEIVABLE_GL, None)),
-        ), patch.object(
-            payment_service.engine, "record_customer_receipt",
-            new=AsyncMock(return_value={"entry": None}),
-        ) as engine_r:
+        ), patch(
+            "app.services.accounting_service.validate_journal", new=AsyncMock()
+        ), patch(
+            "app.services.accounting_service.post_journal", new=AsyncMock()
+        ):
             await payment_service.record_customer_receipt(
                 organization_id=ORG,
                 customer_id=CUSTOMER,
@@ -109,9 +116,11 @@ class TestSettlementChannelRouting:
             )
         settle.assert_awaited_once()
         assert settle.await_args.kwargs["payment_method"] == "CASH"
-        jk = engine_r.await_args.kwargs
-        assert jk["bank_account_id"] == CASH_GL
-        assert jk["receivable_account_id"] == RECEIVABLE_GL
+        lines = rpc.await_args.kwargs["params"]["p_journal"]["lines"]
+        assert lines[0]["account_id"] == str(CASH_GL)
+        assert lines[0]["debit"] == 5000.0
+        assert lines[1]["account_id"] == str(RECEIVABLE_GL)
+        assert lines[1]["credit"] == 5000.0
 
 
 class TestNatureAwarePartySide:
