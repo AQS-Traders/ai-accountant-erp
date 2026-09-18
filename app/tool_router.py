@@ -23,6 +23,7 @@ from app.auth import AuthContext
 from app.database import fetch_many
 from app.date_parser import parse_transaction_date
 import app.error_normalizer as error_norm
+from app import idempotency as idem
 from app.error_normalizer import normalize_error
 from app.models.schemas import ToolCall, ToolResult
 from app.permissions import authorize_tool
@@ -177,60 +178,65 @@ async def route_tool_call(
                 error=f"Validation failed: {'; '.join(validation.errors)}",
             )
 
-    # 3b. Session-level duplicate protection for trusted financial
-    #     operations.  If the SAME mutation (same tool, same amount) already
-    #     succeeded within THIS execution session, return the prior result
-    #     instead of creating a duplicate financial record.
-    if slug == "record_cash_sale" and session_id:
-        try:
-            prior_calls = await fetch_many(
-                "ai_tool_calls",
-                filters={"execution_session_id": str(session_id)},
-                limit=100,
-            )
-            tools_rows = await fetch_many("ai_tools", filters={}, limit=200)
-            slug_by_id = {t.get("id"): t.get("slug") for t in tools_rows}
+    # 3b. EXACTLY-ONCE PROTECTION for financial mutations (migration 075).
+    #
+    # Replaces the previous amount-based guard, which covered ONE tool slug in
+    # ONE session with no persistence and treated two legitimately identical
+    # transactions as one — i.e. it could suppress a real financial record.
+    #
+    #   replay      -> identical retry: return the ORIGINAL stored result
+    #   in_progress -> an identical request is already running
+    #   40001       -> the key was reused with DIFFERENT parameters
+    op_id: Optional[uuid.UUID] = None
+    if not read_only and slug in idem.FINANCIAL_MUTATION_TOOLS:
+        arguments = dict(arguments)
+        explicit_key = arguments.pop("idempotency_key", None)
+        key = idem.derive_key(
+            explicit=explicit_key, session_id=session_id, operation=slug
+        )
+        if key:
             try:
-                this_amount = float((arguments or {}).get("amount", 0))
-            except (TypeError, ValueError):
-                this_amount = None
-            for c in prior_calls:
-                if slug_by_id.get(c.get("tool_id")) != slug:
-                    continue
-                if (c.get("status") or "") != "COMPLETED":
-                    continue
-                payload = c.get("input_payload") or {}
-                if isinstance(payload, str):
-                    import json as _json
-
-                    try:
-                        payload = _json.loads(payload)
-                    except _json.JSONDecodeError:
-                        payload = {}
-                try:
-                    prior_amount = float((payload or {}).get("amount", 0))
-                except (TypeError, ValueError):
-                    continue
-                if this_amount is not None and abs(prior_amount - this_amount) < 0.01:
-                    log.warning(
-                        "tool_router.duplicate_cash_sale_blocked",
-                        session_id=str(session_id),
-                        amount=this_amount,
-                    )
+                outcome = await idem.claim(
+                    organization_id=organization_id,
+                    operation=slug,
+                    key=key,
+                    arguments=arguments,
+                    user_id=user_id,
+                )
+                state = (outcome or {}).get("state")
+                if state == "replay":
+                    log.info("tool_router.idempotent_replay", tool=slug)
+                    replayed = outcome.get("result") or {}
                     return ToolResult(
                         tool_name=slug,
                         success=True,
-                        data={
-                            "duplicate_blocked": True,
-                            "note": (
-                                "A cash sale of this amount was already "
-                                "recorded in this session — no duplicate "
-                                "journal was created."
-                            ),
-                        },
+                        data={**replayed, "replayed": True},
                     )
-        except Exception as exc:  # noqa: BLE001 — never block on guard failure
-            log.warning("tool_router.idempotency_guard_failed", error=str(exc)[:200])
+                if state == "in_progress":
+                    log.warning("tool_router.idempotent_in_progress", tool=slug)
+                    return ToolResult(
+                        tool_name=slug,
+                        success=False,
+                        error=(
+                            "An identical request is already being processed. "
+                            "Not repeating it, to avoid a duplicate document."
+                        ),
+                    )
+                op_id = outcome.get("id")
+            except Exception as exc:  # noqa: BLE001 — never block on guard failure
+                if idem.is_key_conflict(exc):
+                    log.warning("tool_router.idempotency_key_conflict", tool=slug)
+                    return ToolResult(
+                        tool_name=slug,
+                        success=False,
+                        error=(
+                            "This request key was already used for a different "
+                            "request. Use a new key for a new operation."
+                        ),
+                    )
+                log.warning(
+                    "tool_router.idempotency_claim_failed", error=str(exc)[:200]
+                )
 
     # 3b. Work Stream A - transaction-date protocol: map a resolved
     #     transaction_date onto the tool's native date parameter; when the
@@ -260,6 +266,15 @@ async def route_tool_call(
                     "date_defaulted": True,
                     "transaction_date": arguments[date_param],
                 }
+        # Record the outcome LAST, so the stored result is exactly what the
+        # caller saw — including the honest date disclosure above.  A replay
+        # must not report a different payload from the original attempt.
+        if op_id is not None:
+            await idem.safe_complete(
+                op_id,
+                result=(result.data if result.success else None),
+                error=(None if result.success else result.error),
+            )
         log.info(
             "tool_router.executed",
             tool=slug,

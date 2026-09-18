@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from app.database import call_rpc
 from app.repositories import invoice_repository as inv_repo
 from app.repositories import invoice_item_repository as item_repo
 from app.services import customer_service, accounting_service
@@ -90,34 +91,46 @@ async def create_invoice(
     if total == 0:
         total = subtotal + tax_total - discount_total
 
-    invoice = await inv_repo.create_invoice(
-        organization_id=organization_id,
-        customer_id=customer_id,
-        invoice_date=inv_date,
-        due_date=due_date,
-        currency_code=currency_code,
-        subtotal=subtotal,
-        tax_total=tax_total,
-        discount_total=discount_total,
-        total=total,
-        payment_terms_days=payment_terms_days,
-        project_id=project_id,
-        quotation_id=quotation_id,
-        notes=notes,
-        terms=terms,
-        created_by=created_by,
-    )
-
-    # PARITY: persist the line items through the repository — the AI tool
-    # path and any future backend-API path land in the exact same rows the
-    # manual form produces (identical shape, identical validation).
-    if normalized_items:
-        saved_items = await item_repo.add_invoice_items(
-            organization_id, invoice_id=uuid.UUID(str(invoice["id"])),
-            items=normalized_items,
-        )
-        invoice["items"] = saved_items
-        invoice["item_count"] = len(saved_items)
+    # ATOMIC POSTING (migration 076): the header, its lines and any journal go
+    # into ONE database transaction, so a failure can never leave a document
+    # without its lines — the partial state the previous three-write sequence
+    # allowed. All arithmetic and validation above is unchanged.
+    header = {
+        "customer_id": str(customer_id),
+        "invoice_date": inv_date,
+        "due_date": due_date,
+        "currency_code": currency_code,
+        "subtotal": subtotal,
+        "discount_total": discount_total,
+        "tax_total": tax_total,
+        "total": total,
+        "payment_terms_days": payment_terms_days,
+        "project_id": str(project_id) if project_id else None,
+        "quotation_id": str(quotation_id) if quotation_id else None,
+        "notes": notes,
+        "terms": terms,
+        "created_by": str(created_by) if created_by else None,
+    }
+    items_payload = [
+        {
+            k: (str(v) if isinstance(v, uuid.UUID) else v)
+            for k, v in item.items()
+        }
+        for item in normalized_items
+    ]
+    outcome = await call_rpc(
+        "post_invoice_atomic",
+        params={
+            "p_organization_id": str(organization_id),
+            "p_header": header,
+            "p_items": items_payload,
+            "p_journal": None,
+        },
+    ) or {}
+    invoice = outcome.get("invoice") or {}
+    if outcome.get("items"):
+        invoice["items"] = outcome["items"]
+        invoice["item_count"] = outcome.get("item_count", 0)
 
     log.info(
         "invoice.created",

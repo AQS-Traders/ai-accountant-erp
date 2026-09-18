@@ -109,33 +109,44 @@ def _posted_journal(**over):
 class TestInvoiceItemsParity:
 
     async def _create(self, items):
+        """Create via invoice_service and capture the ATOMIC RPC payload.
+
+        The service now posts header + lines (+ journal) through ONE
+        transactional RPC (migration 076) instead of separate repository
+        writes, so this patches that boundary.  Every parity guarantee the
+        original test asserted is still asserted: line_total computed per
+        line, header totals recomputed from the validated lines, and the
+        items persisted through the same normalisation path.
+        """
+
+        async def _rpc(name, *, params=None):
+            assert name == "post_invoice_atomic", name
+            return {
+                "invoice": {
+                    "id": INVOICE_ID, "invoice_number": "INV-0001",
+                    "invoice_date": "2026-09-04",
+                },
+                "items": params["p_items"],
+                "item_count": len(params["p_items"]),
+            }
+
+        rpc = AsyncMock(side_effect=_rpc)
         with patch(
             "app.services.customer_service.get",
             new=AsyncMock(return_value={"id": CUSTOMER_ID, "name": "TechVision"}),
-        ), patch.object(
-            inv_repo, "create_invoice",
-            new=AsyncMock(return_value={
-                "id": INVOICE_ID, "invoice_number": "INV-0001",
-                "invoice_date": "2026-09-04", "total": 0.0,
-            }),
-        ) as create_header, patch(
-            "app.repositories.invoice_item_repository.add_invoice_items",
-            new=AsyncMock(
-                side_effect=lambda org, *, invoice_id, items: [dict(i) for i in items]
-            ),
-        ) as add_items:
+        ), patch.object(invoice_service, "call_rpc", new=rpc):
             result = await invoice_service.create_invoice(
                 organization_id=ORG,
                 customer_id=uuid.UUID(CUSTOMER_ID),
                 items=items,
             )
-        return result, add_items, create_header
+        return result, rpc
 
     @pytest.mark.asyncio
     async def test_invoice_items_parity(self):
-        """AI-path invoice with 2 named items ⇒ exactly 2 invoice_items rows
-        through the SAME repository the manual path uses; header totals
-        recomputed from the validated lines; line_total computed per line."""
+        """AI-path invoice with 2 named items ⇒ exactly 2 invoice_items rows,
+        header totals recomputed from the validated lines, line_total computed
+        per line — all in ONE atomic call."""
         items = [
             {"description": "Widget A", "quantity": 2, "unit_price": 500.0},
             {
@@ -143,22 +154,23 @@ class TestInvoiceItemsParity:
                 "discount_amount": 200.0, "tax_amount": 100.0,
             },
         ]
-        result, add_items, create_header = await self._create(items)
+        result, rpc = await self._create(items)
 
-        add_items.assert_awaited_once()
-        saved = add_items.await_args.kwargs["items"]
+        rpc.assert_awaited_once()
+        params = rpc.await_args.kwargs["params"]
+        saved = params["p_items"]
         assert len(saved) == 2
         # line_total computed by the service — never trusted from the caller
         assert saved[0]["line_total"] == 1000.0
         assert saved[1]["line_total"] == 1100.0  # 1200 − 200 + 100
 
-        # header totals recomputed from the validated lines and passed to
-        # the repository (subtotal = Σ quantity×unit_price; total = Σ lines)
-        header_kwargs = create_header.await_args.kwargs
-        assert header_kwargs["subtotal"] == 2200.0
-        assert header_kwargs["discount_total"] == 200.0
-        assert header_kwargs["tax_total"] == 100.0
-        assert header_kwargs["total"] == 2100.0
+        # header totals recomputed from the validated lines (subtotal =
+        # Σ quantity×unit_price; total = Σ lines)
+        header = params["p_header"]
+        assert header["subtotal"] == 2200.0
+        assert header["discount_total"] == 200.0
+        assert header["tax_total"] == 100.0
+        assert header["total"] == 2100.0
         assert result["item_count"] == 2
         assert result["items"][0]["description"] == "Widget A"
 
