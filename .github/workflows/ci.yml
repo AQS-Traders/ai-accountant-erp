@@ -1,0 +1,73 @@
+﻿name: CI
+
+# The repository previously had NO CI at all, and the backend test suite was
+# gitignored - so nothing verified a change before it reached production.
+# This workflow runs the backend suite plus the frontend type-check, lint,
+# unit tests and production build on every push and pull request.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The suite is hermetic: app/tests/conftest.py supplies dummy Supabase
+      # credentials, so no secrets are needed here.  A missing DATABASE/URL
+      # is deliberate - nothing in CI may touch a live project.
+      - name: Run backend tests
+        run: python -m pytest app/tests -q
+
+  frontend:
+    name: Frontend (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      # --passWithNoTests: the frontend has no unit tests yet, and a bare
+      # `vitest run` exits non-zero when it finds none.  Remove the flag once
+      # component tests exist.
+      - name: Unit tests
+        run: npm run test -- --passWithNoTests
+
+      - name: Build
+        run: npm run build
+
