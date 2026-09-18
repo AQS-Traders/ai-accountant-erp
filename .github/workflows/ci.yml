@@ -44,6 +44,14 @@ jobs:
     defaults:
       run:
         working-directory: frontend
+    # The Supabase client is constructed at module scope, so `next build`
+    # prerendering requires the URL/key to exist.  Placeholder values keep
+    # the build hermetic — this artifact is never deployed, and the anon key
+    # is browser-public by design, but the real project URL still does not
+    # belong in a public repository.
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key-not-a-real-key
     steps:
       - uses: actions/checkout@v4
 
