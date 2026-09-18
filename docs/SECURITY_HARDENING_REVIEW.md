@@ -274,3 +274,50 @@ live migration history (file-prefixed name + apply-tool name). All four are
 idempotent (`if not exists` / `create or replace`), live schema matches the
 repository, and the duplication is bookkeeping-only — no corrective action
 required.
+
+---
+
+## Advisor sweep — 2026-09-18 (this session)
+
+A fresh `get_advisors(security)` run against the live project produced four
+finding classes. Two were actionable and are now **closed by migration 080**
+(`080_security_advisory_fixes.sql`); two are deliberate design and are recorded
+here as accepted.
+
+**Fixed (verified by query, not by tool success message):**
+
+| Advisor finding | Fix | Verification |
+| --- | --- | --- |
+| `function_search_path_mutable` on `public.account_template_for_business_type` | `ALTER FUNCTION ... SET search_path = pg_catalog, public` | `proconfig` now returns `search_path=pg_catalog, public`; the function still returns the correct template code |
+| `anon_security_definer_function_executable` on `create_organization(...)` and `accept_my_team_invite()` | `REVOKE EXECUTE ... FROM anon, public; GRANT EXECUTE ... TO authenticated` | `has_function_privilege('anon', ...)` = false for both; `authenticated` = true for both |
+
+Why revoking from `anon` is safe (each point verified in code, not assumed):
+
+* `accept_my_team_invite` is called from exactly one place —
+  `frontend/src/app/(dashboard)/settings/page.tsx` — inside the authenticated
+  dashboard shell (the `(dashboard)` layout calls `supabase.auth.getUser()`
+  and the middleware guards the route).
+* `create_organization` is called from the onboarding wizard with the user's
+  own JWT (`frontend/src/app/onboarding/page.tsx:191`), which is exactly the
+  intent documented at `app/main.py:773`.
+* No anonymous sign-in flow exists (`signInAnonymously`/`signInWithOtp` appear
+  nowhere in `frontend/src`), so `anon` never legitimately reaches either RPC.
+* Both functions additionally self-reject when `auth.uid() IS NULL`, so the
+  change is defence-in-depth, not the only barrier.
+
+**Accepted as intentional (documented, no action):**
+
+* `rls_enabled_no_policy` on `ai.worker_jobs` and `public.financial_operations`
+  (INFO) — both are service-role-only tables. The Python backend connects with
+  the service key, which bypasses RLS entirely; no client policy is wanted.
+  A permissive client policy would be the actual vulnerability.
+* `authenticated_security_definer_function_executable` (WARN, 19 functions) —
+  these are the application's designed client-side RPC surface (team
+  management, onboarding, reporting, journal reversal). They are called with
+  the user's own JWT and enforce organisation membership/roles internally.
+  `authenticated` is the *minimum* role that must reach them, so this finding
+  class has no safe remediation without breaking the product.
+* `auth_leaked_password_protection` (WARN) — a Supabase Auth **dashboard**
+  setting, not a SQL object. **Manual step for the owner:** enable
+  "Leaked password protection" under Authentication → Settings. This is the
+  one remaining action that cannot be delivered from code.

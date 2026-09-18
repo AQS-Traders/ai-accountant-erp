@@ -1798,11 +1798,46 @@ async def execute(
         # Work Stream F: learned org defaults feed the planner as
         # answered-for entities (an explicit user value always wins).
         org_prefs = await _load_org_preferences(organization_id)
-        execution_plan = run_planner(
+        # ---- PHASE 2a: GROUNDED LLM ENTITY SEGREGATION --------------------
+        # The regex extractor matches only fixed phrasings; any phrasing
+        # outside them leaves the party/item unstated and the agent re-asks
+        # for facts the user already gave. A cheap deterministic probe plan
+        # detects those gaps; only then is ONE grounded LLM call made to
+        # segregate the user's OWN sentence. Every value is verified to
+        # appear verbatim in the text before acceptance and is handed to the
+        # planner as a PREFILL — regex captures and clarification answers
+        # still win. Provider down / timeout / bad JSON -> exactly the old
+        # regex-only behaviour (Work Stream S1).
+        _probe_plan = run_planner(
             user_message,
             clarification_history=prior_qa,
             org_preferences=org_prefs,
         )
+        _seg_gaps = [
+            f
+            for f in ("supplier_name", "customer_name", "item_description")
+            if not _probe_plan.extracted_entities.get(f)
+        ]
+        _segregated: Dict[str, Any] = {}
+        if _seg_gaps and not _probe_plan.batch_items:
+            from app.entity_segregation import segregate_entities
+
+            _segregated = await segregate_entities(
+                user_message, orchestrator=get_client()
+            )
+        if _segregated:
+            execution_plan = run_planner(
+                user_message,
+                clarification_history=prior_qa,
+                org_preferences=org_prefs,
+                prefill_entities=_segregated,
+            )
+            await _log_step(session_id, "ENTITY_SEGREGATION", {
+                "filled": sorted(_segregated.keys()),
+                "source": "grounded_llm",
+            })
+        else:
+            execution_plan = _probe_plan
         _phase_elapsed("planner.done", intent=execution_plan.intent)
 
         # Work Stream E: deterministic semantic tool shortlist.  Seeds the

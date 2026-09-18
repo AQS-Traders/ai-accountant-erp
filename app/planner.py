@@ -503,6 +503,7 @@ def plan(
     user_message: str,
     clarification_history: Optional[List[Dict[str, str]]] = None,
     org_preferences: Optional[Dict[str, str]] = None,
+    prefill_entities: Optional[Dict[str, Any]] = None,
 ) -> ExecutionPlan:
     """Analyse *user_message* (+ prior Q&A) and return an ``ExecutionPlan``.
 
@@ -514,6 +515,11 @@ def plan(
     ``org_preferences`` (Work Stream F) carries learned organization-level
     defaults; they are treated as answered-for entities UNLESS the user
     explicitly said something different in the message or history.
+
+    ``prefill_entities`` (Work Stream S1) carries grounded values produced by
+    the LLM entity-segregation stage. They are inserted with ``setdefault``
+    semantics — a value captured by regex from the message, answered in a
+    clarification round, or learned as an org preference always wins.
     """
     msg = user_message.strip()
     msg_lower = msg.lower()
@@ -900,6 +906,23 @@ def plan(
     # 6. Determine tools + context sources
     tools = _tools_for_intent(intent)
     context = _context_for_intent(intent)
+
+    # 5a. GROUNDED PREFILL (Work Stream S1) — values segregated by the LLM
+    #     entity stage fill GAPS only: regex captures, clarification answers
+    #     and org preferences (already merged above) always win.
+    for _pk, _pv in (prefill_entities or {}).items():
+        if _pv is None or _pv == "":
+            continue
+        if _pk == "item_quantity":
+            # Mirror the regex path, which fills the generic quantity alias
+            # alongside the item-scoped one.
+            if not entities.get("item_quantity"):
+                entities["item_quantity"] = _pv
+                if not entities.get("quantity"):
+                    entities["quantity"] = _pv
+            continue
+        if not entities.get(_pk):
+            entities[_pk] = _pv
 
     # 6. Clarification — DYNAMIC, MINIMAL and CONSOLIDATED:
     #    only genuinely-missing material info, gathered into ONE
