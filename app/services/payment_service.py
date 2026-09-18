@@ -285,7 +285,7 @@ async def _update_invoice_paid(
         status = inv.get("status", "ISSUED")
     await update_one("invoices", row_id=invoice_id, data={
         "amount_paid": new_paid, "status": status,
-    })
+    }, organization_id=organization_id)
 
 
 async def _update_bill_paid(
@@ -305,7 +305,7 @@ async def _update_bill_paid(
         status = bill.get("status", "OPEN")
     await update_one("purchase_bills", row_id=bill_id, data={
         "amount_paid": new_paid, "status": status,
-    })
+    }, organization_id=organization_id)
 
 
 # ---------------------------------------------------------------------------

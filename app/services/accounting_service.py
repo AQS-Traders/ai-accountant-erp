@@ -106,8 +106,12 @@ async def get_entry(
     return await j_repo.get_journal_entry(organization_id, entry_id=entry_id)
 
 
-async def get_lines(*, entry_id: uuid.UUID) -> List[Dict[str, Any]]:
-    return await j_repo.get_journal_lines(entry_id=entry_id)
+async def get_lines(
+    *, entry_id: uuid.UUID, organization_id: Optional[uuid.UUID] = None
+) -> List[Dict[str, Any]]:
+    return await j_repo.get_journal_lines(
+        entry_id=entry_id, organization_id=organization_id
+    )
 
 
 async def resolve_account(

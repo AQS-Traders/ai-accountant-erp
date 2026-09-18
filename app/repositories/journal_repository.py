@@ -95,11 +95,22 @@ async def get_journal_entry(
 
 
 async def get_journal_lines(
-    *, entry_id: uuid.UUID
+    *, entry_id: uuid.UUID, organization_id: Optional[uuid.UUID] = None
 ) -> List[Dict[str, Any]]:
+    """Return the lines of a journal entry, oldest first.
+
+    DEFENCE IN DEPTH: ``journal_lines`` carries ``organization_id``, so pass it
+    to add a second filter.  The entry id is normally already org-verified by
+    :func:`get_journal_entry`, but without this a foreign entry id would return
+    another tenant's lines.  This unscoped read was flagged as a latent hole in
+    the repository's own audit (docs/CODEBASE_INTEGRATION_AUDIT.md).
+    """
+    filters: Dict[str, Any] = {"entry_id": str(entry_id)}
+    if organization_id is not None:
+        filters["organization_id"] = str(organization_id)
     return await fetch_many(
         "journal_lines",
-        filters={"entry_id": str(entry_id)},
+        filters=filters,
         order="line_number.asc",
     )
 
