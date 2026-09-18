@@ -129,6 +129,7 @@ measurement; three remain open by deliberate decision.
 | Gap | Evidence | Why still open |
 |---|---|---|
 | **`ai.worker_jobs` has RLS enabled with no policy** | Adviser lint `0008` | Intentional (backend-only; service role bypasses RLS). |
+| **`public.financial_operations` has RLS enabled with no policy** | Adviser lint `0008` (raised after migration 075) | Same pattern: backend-only idempotency ledger; all access is via the `service_role`-only claim/complete RPCs; no direct table grant to `anon`/`authenticated`. |
 | **`account_template_for_business_type` has a mutable `search_path`** | Adviser lint `0011` | Low risk (not SECURITY DEFINER) but should be pinned. |
 | **Leaked-password protection disabled** | Adviser `auth_leaked_password_protection` | Supabase Auth portal setting, not code. |
 
