@@ -70,8 +70,8 @@ drop policy if exists org_update on public.organizations;
 create policy org_update on public.organizations
   for update
   to authenticated
-  using (public.has_org_role(id, 2))
-  with check (public.has_org_role(id, 2));
+  using (public.has_org_role(id, 2::smallint))
+  with check (public.has_org_role(id, 2::smallint));
 
 -- ---------------------------------------------------------------------
 -- FINDING 3/4/5 — membership writes require OWNER or ADMIN.
@@ -88,21 +88,21 @@ drop policy if exists members_insert on public.organization_members;
 create policy members_insert on public.organization_members
   for insert
   to authenticated
-  with check (public.has_org_role(organization_id, 2));
+  with check (public.has_org_role(organization_id, 2::smallint));
 
 drop policy if exists members_update on public.organization_members;
 create policy members_update on public.organization_members
   for update
   to authenticated
-  using (public.has_org_role(organization_id, 2))
+  using (public.has_org_role(organization_id, 2::smallint))
   with check (
-    public.has_org_role(organization_id, 2)
+    public.has_org_role(organization_id, 2::smallint)
     and (
       -- Granting OWNER requires being an OWNER.
       role_id <> (
         select r.id from public.organization_roles r where r.code = 'OWNER'
       )
-      or public.has_org_role(organization_id, 1)
+      or public.has_org_role(organization_id, 1::smallint)
     )
   );
 
@@ -111,7 +111,7 @@ create policy members_delete on public.organization_members
   for delete
   to authenticated
   using (
-    public.has_org_role(organization_id, 2)
+    public.has_org_role(organization_id, 2::smallint)
     and (
       -- The OWNER membership is not removable through the client API.
       role_id <> (
