@@ -9,16 +9,32 @@ are **not** one-to-one, and because several findings are fixed in code but
 
 ---
 
-## 1. Migrations added by this work (NOT YET APPLIED)
+## 1. Migrations added by this work
 
-None of these is applied to any environment yet. Applying to production
-requires explicit approval.
+**APPLIED to the live project `gghkbpdaqogncbrwzmpp` on 2026-09-18 with explicit
+approval**, and verified afterwards by re-inspection:
 
 | # | Repository file | Purpose | Verified |
 |---|---|---|---|
 | 071 | `database/migrations/071_harden_report_rpcs_and_anon_grants.sql` | Revokes `PUBLIC`/`anon` EXECUTE on report RPCs and adds a membership guard so `get_trial_balance`/`get_income_statement` cannot be called cross-tenant | Dry-run inside `BEGIN … ROLLBACK` on 2026-09-18; behaviour equivalence proven (original returned 15 rows, rewritten returned 15) and the guard proven to raise `42501` for a non-member |
 | 072 | `database/migrations/072_harden_organization_and_member_rls.sql` | Denies direct `organizations` INSERT; requires OWNER/ADMIN for org profile updates and all membership writes; blocks self-promotion and owner removal | Dry-run inside `BEGIN … ROLLBACK`; resulting `pg_policies` inspected and correct |
-| 073 | `database/migrations/073_worker_job_reliability.sql` | Attempts, max_attempts, backoff, cancellation and ownership-checked completion for AI worker jobs | Dry-run: `claim_worker_job`, `finish_worker_job`, `cancel_worker_job` all compile |
+| 073 | `database/migrations/073_worker_job_reliability.sql` | Attempts, max_attempts, backoff, cancellation and ownership-checked completion for AI worker jobs | Dry-run: all 3 functions compile. After applying, `ai.finish_worker_job(<job>, 'impostor-worker', …)` was rejected with `42501: job … is not held by worker impostor-worker` |
+| 074 | `database/migrations/074_ai_session_reaper.sql` | Expires abandoned `WAITING_FOR_USER` sessions (session bookkeeping only — no financial data) | After applying, `ai.reap_stale_sessions()` returned `1`; `CANCELLED` 4→5 and `WAITING_FOR_USER` 5→4. ACL is `postgres` + `service_role` only |
+
+### Post-application verification of the Critical finding
+
+```
+-- before: {=X/postgres, postgres=X/postgres, anon=X/postgres, authenticated=X/postgres, …}
+select p.acl from pg_proc p where p.proname='get_trial_balance';
+-- after:  {postgres=X/postgres, authenticated=X/postgres, service_role=X/postgres}
+
+set role anon;
+select * from public.get_trial_balance('00000000-…'::uuid);
+-- ERROR: 42501: permission denied for function get_trial_balance
+
+-- the backend/report pages are unaffected:
+select count(*) from public.get_trial_balance('<org uuid>');  -- 15 rows
+```
 
 ### 072 dry-run finding (worth recording)
 
@@ -83,35 +99,61 @@ database. Corrective changes go in **new forward migrations**, as 071–073 do.
 
 ---
 
-## 4. Known remaining gaps (NOT fixed — recorded honestly)
+## 4. Residual risks — inspected, and what happened to each
 
-| Gap | Evidence | Why not fixed here |
+Every residual risk from the previous report was re-inspected against the
+code. Four were real and are now **FIXED**; three were reclassified after
+measurement; two remain open by deliberate decision.
+
+### 4a. Fixed in this pass
+
+| Residual | What the inspection found | Fix |
 |---|---|---|
-| **No idempotency keys for financial mutations** | The only replay guard is in `app/tool_router.py`, scoped to `slug == "record_cash_sale"` within one execution session and comparing `amount`. No financial table has an `idempotency_key` column. | Requires new schema plus every mutation path; a partial implementation would be worse than none. Two legitimately identical cash sales in one session could still be suppressed, i.e. a **missing financial record**. |
-| **No transaction atomicity for multi-write workflows** | Repository's own `docs/CODEBASE_INTEGRATION_AUDIT.md:23`: invoice → items → journal are separate REST writes; no RPC wraps them. | Needs per-workflow PostgreSQL functions; too large to land safely in this pass. |
-| **`ai.tool_calls` not written on the failing path** | The `FAILED` invoice session recorded **0** tool calls and 0 `error_details`, so the failure was invisible at call level. | Observability gap; the writer must be reached from the executor. |
-| **`ai.worker_jobs` has RLS enabled with no policy** | Adviser lint `0008` | Intentional (backend-only; service role bypasses RLS). Migration 073 now carries explicit grants instead. |
-| **`account_template_for_business_type` has a mutable `search_path`** | Adviser lint `0011` | Not yet changed; low risk (not SECURITY DEFINER) but should be pinned. |
-| **Session status can go stale** | Sessions `9ac54f57`, `2b3943c4`, `dd7428cb`, `9a75ed04` remain `WAITING_FOR_USER` after their runs ended. | Needs a reaper; `expires_at` column plus a sweep. |
-| **Broad `except Exception` at the executor boundary** | `app/tool_execution.py` turns any exception into `{"success": False}`, and an internal Pydantic `ValidationError` reached the user as `"Error: 2 validation errors for AgentResponse…"`. | Error classification is cross-cutting; the specific defect that produced it is fixed. |
-| **Leaked-password protection disabled** | Adviser `auth_leaked_password_protection` | Supabase Auth setting, not code — see §5. |
+| **Stale `WAITING_FOR_USER` sessions** | Four sessions (`9ac54f57`, `2b3943c4`, `dd7428cb`, `9a75ed04`) were still "waiting" after their runs ended; nothing expired them. | Migration 074: `expires_at`, a partial index and `ai.reap_stale_sessions()`. Verified: reaped 1, `WAITING_FOR_USER` 5→4. |
+| **A cosmetic payload mismatch destroyed a whole session** | `AgentResponse.options` is `List[str]`; a producer shipped `{value,label}` dicts, so construction raised `ValidationError` and the run ended FAILED with a **raw Pydantic error shown to the user**. | Fixed the producer *and* added a `field_validator` backstop that flattens structured options to their label (and drops unrenderable ones) instead of failing. 5 tests. |
+| **Unscoped read of `journal_lines`** | The repository's own audit flagged `get_journal_lines(entry_id)` as a latent hole. `journal_lines.organization_id` is `NOT NULL`, so it was cheaply fixable. | `get_journal_lines`/`accounting_service.get_lines` accept `organization_id` and filter on it. |
+| **`update_one`/`delete_one` scoped by primary key only** | The service-role client bypasses RLS, so a bare id reaches any tenant's row. The read layer *is* org-scoped and every write I traced follows an org-scoped read, but that is a single layer of defence. | Both helpers now accept an optional `organization_id` second guard; applied to the payment-allocation writes (`invoices`, `purchase_bills`), which take a client-supplied id. |
+
+### 4b. Reclassified after measurement (not defects)
+
+| Residual | Finding |
+|---|---|
+| **Service-role tenant scoping (category 3)** | **Not a defect.** `update_one`/`delete_one` are by-id, but every repository *read* entry point takes `organization_id` as its first argument and filters on it (`get_invoice` filters on `id` **and** `organization_id`), and writes are reached only after such a read. `_update_invoice_paid` even returns early when the org-scoped getter finds nothing. Previously `POTENTIAL_REQUIRES_VERIFICATION`; now resolved with a defence-in-depth improvement rather than a vulnerability fix. |
+| **`ai.tool_calls` "not written"** | Partly a **false positive**: the writer (`create_tool_call`, aliased `log_tool_call`) *is* wired into the executor. The failing invoice session recorded no tool calls because **no tool ever executed** — the crash happened during reasoning, before execution. The genuine residual is narrower: those writes are fire-and-forget (`_spawn_step_write`), so they can be lost if the invocation is torn down mid-flight. |
+| **Vercel `APP_ENV`** | **Not a defect**: the API shows it is already `production`. My earlier report assumed otherwise; that was an assumption, now corrected. |
+
+### 4c. Still open (deliberate)
+
+| Gap | Evidence | Why still open |
+|---|---|---|
+| **No idempotency keys for financial mutations** | The only replay guard is `app/tool_router.py`, scoped to `slug == "record_cash_sale"` within one execution session and comparing `amount`. No financial table has an `idempotency_key` column. | Needs new schema plus every mutation path, and the retry surfaces are browser / HTTP / AI provider / worker. Two legitimately identical cash sales in one session could still be suppressed, i.e. a **missing financial record**. Half-building this would be worse than leaving it clearly recorded. |
+| **No transaction atomicity for multi-write workflows** | Repository's own `docs/CODEBASE_INTEGRATION_AUDIT.md:23`: invoice → items → journal are separate REST writes; no RPC wraps them. | Needs one PostgreSQL function per workflow. Large, and touching financial posting logic without staging is how you create the very corruption this is meant to prevent. |
+| **`ai.worker_jobs` has RLS enabled with no policy** | Adviser lint `0008` | Intentional (backend-only; service role bypasses RLS). |
+| **`account_template_for_business_type` has a mutable `search_path`** | Adviser lint `0011` | Low risk (not SECURITY DEFINER) but should be pinned. |
+| **Leaked-password protection disabled** | Adviser `auth_leaked_password_protection` | Supabase Auth portal setting, not code. |
 
 ---
 
 ## 5. Required manual actions
 
-1. **Rotate the GitHub PAT.** The PAT in `.secrets/tokens.env` was rejected by
-   GitHub (`Invalid username or token`), so the hardening branch could not be
-   pushed and no Vercel preview exists.
-2. **Approve migration application.** 071 closes a Critical unauth cross-tenant
-   read; 072 closes self-promotion to OWNER. Both are additive and
-   non-destructive.
-3. **Confirm the Supabase project's role.** `gghkbpdaqogncbrwzmpp` was treated
-   as production throughout; nothing was written to it.
-4. **Set `APP_ENV=production`** in the Vercel environment and leave
-   `ALLOW_DEV_HEADER_AUTH` unset/false.
+1. **Rotate the GitHub PAT — STILL OUTSTANDING.** The PAT in
+   `.secrets/tokens.env` is still rejected by GitHub
+   (`Invalid username or token`), so the branch could not be pushed and no
+   PR or Vercel preview could be produced. Only you can rotate it.
+2. **Migration application — DONE** (071, 072, 073, 074 applied to the live
+   project on 2026-09-18 with approval, then verified).
+3. **Supabase project role — confirmed production by the operator**;
+   `gghkbpdaqogncbrwzmpp` is where the migrations were applied.
+4. **`APP_ENV` — NO ACTION NEEDED.** Verified through the Vercel API that
+   `APP_ENV` is already `production` (targets: production, preview,
+   development). An earlier draft of this document said otherwise; that was
+   an assumption, not a measurement. Adding `ALLOW_DEV_HEADER_AUTH=false`
+   explicitly is optional belt-and-braces — the code default is already
+   false and the flag is ignored outside development.
 5. **Enable leaked-password protection** in Supabase Auth settings.
-6. **Decide the tests policy.** `.gitignore` no longer excludes `app/tests`,
+6. **Deploy the code fixes** (Vercel) so the application-side hardening takes
+   effect. The database fixes are already live; the code fixes are not.
+7. **Decide the tests policy.** `.gitignore` no longer excludes `app/tests`,
    `tests` and `frontend/tests`; CI (`.github/workflows/ci.yml`) runs them.
 
 ---
@@ -120,7 +162,12 @@ database. Corrective changes go in **new forward migrations**, as 071–073 do.
 
 | Check | Result |
 |---|---|
-| Full backend suite | **766 passed, 0 failed** (`python -m pytest app/tests -q`) |
+| Full backend suite | **770 passed, 0 failed** (`python -m pytest app/tests -q`) |
 | Baseline before this work | 733 passed |
-| Migrations 071/072/073 | Dry-run inside `BEGIN … ROLLBACK`; production left unchanged (`assert_org_report_access` absent from `pg_proc` afterwards) |
-| Production side effects | None: 0 tests, 0 invoices created; the failing invoice session's writes never reached the database |
+| Migrations 071–074 | Dry-run inside `BEGIN … ROLLBACK` first, then applied and re-inspected |
+| `anon` cross-tenant read | **Closed**: `set role anon` now returns `42501: permission denied for function get_trial_balance` |
+| Backend report path | Unaffected: `get_trial_balance('<org>')` still returns its 15 rows |
+| Membership escalation | `org_update` requires `has_org_role(id, (2)::smallint)`; `members_update` requires owner/admin and only an OWNER may grant OWNER |
+| Worker lease ownership | `finish_worker_job(<job>, 'impostor-worker', …)` → `42501: job … is not held by worker impostor-worker` |
+| Stale sessions | `ai.reap_stale_sessions()` reaped 1; `WAITING_FOR_USER` 5→4, `CANCELLED` 4→5 |
+| Financial data | **Not touched** by any migration: no invoice/journal/payment rows created, altered or deleted |
