@@ -27,6 +27,7 @@ import time
 
 from app.auth import AuthContext
 from app.context_manager import build_context
+from app.books_evidence import render_evidence_compact
 from app.database import (
     create_clarification,
     create_confirmation,
@@ -105,8 +106,10 @@ async def _bounded_provider_call(coro, *, budget: float, stage: str):
     """Await a provider call under a hard wall-clock budget.
 
     Returns ``(result, None)`` on success or ``(None, reason)`` when the
-    budget expired.  The budget only ever triggers where the platform would
-    otherwise terminate the entire function.
+    budget expired OR the provider failed outright.  From the caller's point of
+    view both are the same situation — the model is unavailable — so the run
+    degrades to an honest, resumable response and NOTHING is written.  The
+    failure is logged with its detail so a real wiring bug stays visible.
     """
     try:
         return await asyncio.wait_for(coro, timeout=budget), None
@@ -115,6 +118,11 @@ async def _bounded_provider_call(coro, *, budget: float, stage: str):
             f"The AI provider stopped responding ({stage} took longer than "
             f"{int(budget)}s)."
         )
+    except Exception as exc:  # noqa: BLE001 — a provider error is data here
+        log.warning(
+            "agent.provider_failed", stage=stage, detail=str(exc)[:300]
+        )
+        return None, f"The AI provider could not be reached ({stage})."
 
 
 async def _party_resolution_question(
@@ -1359,6 +1367,55 @@ def party_search_directive(
 
 
 
+def _reasoning_disclosure(reasoning) -> str:
+    """The user-facing disclosure of an ACCEPTED LLM accounting proposal.
+
+    The proposal came from a model that inspected the live books, so the user
+    is shown THAT accounting reading — the interpretation, the records it
+    affects, the proposed impact, what deliberately will not change, the
+    remaining uncertainty and the exact confirmation sentence — instead of the
+    planner's keyword-intent summary.
+    """
+    proposal = getattr(reasoning, "proposal", None) or {}
+    if not proposal:
+        return ""
+    parts: list = []
+    interpretation = str(proposal.get("interpretation") or "").strip()
+    if interpretation:
+        parts.append(interpretation)
+    affected = proposal.get("affected_records") or []
+    if affected:
+        parts.append("Affected: " + "; ".join(str(x) for x in affected[:6]))
+    impact = proposal.get("accounting_impact") or []
+    for entry in impact[:6]:
+        if not isinstance(entry, dict):
+            continue
+        account = str(entry.get("account") or "").strip()
+        for side, verb in (("debit", "Dr"), ("credit", "Cr")):
+            value = entry.get(side)
+            if value in (None, ""):
+                continue
+            try:
+                shown = f"{float(value):,.2f}"
+            except (TypeError, ValueError):
+                shown = str(value)
+            parts.append(f"{verb} {account} {shown}".strip())
+    not_affected = proposal.get("not_affected") or []
+    if not_affected:
+        parts.append(
+            "Not affected: " + "; ".join(str(x) for x in not_affected[:6])
+        )
+    uncertainty = proposal.get("unresolved_uncertainty") or []
+    if uncertainty:
+        parts.append(
+            "Still uncertain: " + "; ".join(str(x) for x in uncertainty[:6])
+        )
+    confirmation = str(proposal.get("confirmation") or "").strip()
+    if confirmation:
+        parts.append(confirmation)
+    return "\n".join(parts)
+
+
 def _confirmation_summary(plan) -> str:
     """Human-readable disclosure of what approval will execute."""
     entities = getattr(plan, "extracted_entities", None) or {}
@@ -1798,46 +1855,194 @@ async def execute(
         # Work Stream F: learned org defaults feed the planner as
         # answered-for entities (an explicit user value always wins).
         org_prefs = await _load_org_preferences(organization_id)
-        # ---- PHASE 2a: GROUNDED LLM ENTITY SEGREGATION --------------------
-        # The regex extractor matches only fixed phrasings; any phrasing
-        # outside them leaves the party/item unstated and the agent re-asks
-        # for facts the user already gave. A cheap deterministic probe plan
-        # detects those gaps; only then is ONE grounded LLM call made to
-        # segregate the user's OWN sentence. Every value is verified to
-        # appear verbatim in the text before acceptance and is handed to the
-        # planner as a PREFILL — regex captures and clarification answers
-        # still win. Provider down / timeout / bad JSON -> exactly the old
-        # regex-only behaviour (Work Stream S1).
-        _probe_plan = run_planner(
+        # ---- PHASE 2a: AI-FIRST SEMANTIC UNDERSTANDING (Work Stream S2) ---
+        # The user's request goes to the LLM FIRST. The semantic layer
+        # (app/semantic_layer.py) understands the BUSINESS MEANING in any
+        # natural wording, grounds every fact against the user's own words
+        # (verbatim names, traceable numbers/dates, validated enums), and
+        # normalization maps that meaning into the ERP's deterministic
+        # vocabulary (activity x terms -> intent; role -> party field). The
+        # planner then computes missing-information analysis against the
+        # MERGED facts, so the questionnaire contains ONLY genuinely
+        # missing/ambiguous fields. The keyword regex extractor is the
+        # FALLBACK: provider down / timeout / bad JSON -> {} -> regex-only
+        # behaviour, unchanged. Deterministic safeguards (auth, validation,
+        # balancing, idempotency, confirmation) are NOT AI. Batch
+        # (enumerated) requests keep their per-item deterministic protocol.
+        # ---- PHASE 2a0: PRELIMINARY EXTRACTION + LLM ACCOUNTING REASONING --
+        # Work Stream S3.  Python extracts ONLY the literal values from the
+        # user's own words and labels them PRELIMINARY.  The LLM is then given
+        # the request + that preliminary extraction + a closed catalog of
+        # read-only evidence lookups, and it decides what to inspect, what to
+        # ask, or what to propose.  Python's role in this stage is purely
+        # enforcement: evidence kinds/arguments are validated, every read is
+        # organization-scoped and permission-checked, proposals must be
+        # complete, and nothing executes here.
+        #
+        # Nothing below replaces the existing pipeline: when the provider is
+        # unavailable, returns no parsable decision, or the request is a batch,
+        # the previous behaviour runs unchanged.
+        from app.accounting_reasoning import (
+            COMPLETE as _R_COMPLETE,
+            NEEDS_INPUT as _R_NEEDS_INPUT,
+            PROPOSAL as _R_PROPOSAL,
+            REFUSAL as _R_REFUSAL,
+            ReasoningFacts as _ReasoningFacts,
+            preliminary_extraction as _preliminary_extraction,
+            proposed_mutation_tools as _proposed_mutation_tools,
+            refusal_text as _refusal_text,
+            run_reasoning_loop as _run_reasoning_loop,
+        )
+        from app.config import get_settings as _get_settings
+
+        _settings = _get_settings()
+        _preliminary = _preliminary_extraction(user_message)
+        await _log_step(session_id, "PRELIMINARY_EXTRACTION", _preliminary)
+
+        _reasoning = None
+        _reasoning_calls: Optional[List[ToolCall]] = None
+        from app.planner import split_batch_request as _split_batch_now
+
+        if getattr(_settings, "accounting_reasoning_enabled", False) and not _split_batch_now(user_message):
+            # The model may only propose names from the TRUSTED registry, so it
+            # is given exactly that vocabulary — Python decides which tools
+            # exist, the model decides which one the event needs.
+            from app.tools import list_tools as _list_registered_tools
+
+            _reasoning = await _run_reasoning_loop(
+                _ReasoningFacts(
+                    user_request=user_message,
+                    conversation_history=list(prior_qa),
+                    preliminary=_preliminary,
+                    org_policies=dict(org_prefs or {}),
+                    today=_preliminary.get("today", ""),
+                ),
+                organization_id=organization_id,
+                auth=auth,
+                session_id=session_id,
+                orchestrator=get_client(),
+                offered_tools=list(_list_registered_tools()),
+                max_rounds=int(
+                    getattr(_settings, "accounting_reasoning_max_rounds", 3)
+                ),
+                step_logger=lambda event, payload: _spawn_step_write(
+                    _log_step(session_id, event, payload)
+                ),
+            )
+            await _log_step(session_id, "ACCOUNTING_REASONING", _reasoning.as_dict())
+            _phase_elapsed(
+                "accounting_reasoning.done",
+                status=_reasoning.status,
+                rounds=_reasoning.rounds,
+            )
+
+        if _reasoning is not None and not _reasoning.provider_failed:
+            if _reasoning.status == _R_REFUSAL:
+                _text = _refusal_text(_reasoning.refusal) or (
+                    "This request cannot be executed safely as stated."
+                )
+                await _update_status(session_id, ExecutionStatus.REJECTED)
+                await _log_step(session_id, "REFUSED_BY_REASONING", {"reason": _text})
+                return AgentResponse(
+                    status=ExecutionStatus.REJECTED,
+                    execution_id=session_id,
+                    summary=_text,
+                )
+            if _reasoning.status == _R_COMPLETE:
+                _text = _refusal_text(_reasoning.refusal) or (
+                    "The records already reflect this request."
+                )
+                await _update_status(session_id, ExecutionStatus.COMPLETED)
+                await _log_step(session_id, "ALREADY_REFLECTED_IN_BOOKS", {
+                    "understanding": _reasoning.understanding,
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.COMPLETED,
+                    execution_id=session_id,
+                    summary=_text,
+                )
+            if _reasoning.status == _R_NEEDS_INPUT and _reasoning.question:
+                # The LLM asked a question GROUNDED in the records it just
+                # inspected — never a template question.
+                _question = str(_reasoning.question.get("text") or "").strip()
+                if _question:
+                    _needed = [
+                        str(f.get("fact") or "information")
+                        for f in (_reasoning.missing_facts or [])
+                    ] or ["information"]
+                    _clar = await create_clarification(
+                        session_id=session_id,
+                        question=_question,
+                        required_fields=_needed,
+                    )
+                    await _update_status(
+                        session_id, ExecutionStatus.AWAITING_CLARIFICATION
+                    )
+                    await _log_step(session_id, "AWAITING_CLARIFICATION", {
+                        "source": "accounting_reasoning",
+                        "question": _question[:500],
+                        "evidence": _reasoning.as_dict().get("evidence"),
+                    })
+                    return AgentResponse(
+                        status=ExecutionStatus.AWAITING_CLARIFICATION,
+                        execution_id=session_id,
+                        question=_clar.get("question", _question),
+                        options=_reasoning.question.get("options") or None,
+                        required_information=_needed,
+                        requires_user_input=True,
+                    )
+            if _reasoning.status == _R_PROPOSAL and _reasoning.proposal:
+                _mutations = _proposed_mutation_tools(_reasoning)
+                if _mutations:
+                    _reasoning_calls = [
+                        ToolCall(
+                            tool_name=call["tool_name"],
+                            arguments=dict(call.get("arguments") or {}),
+                        )
+                        for call in _mutations
+                    ]
+                    await _log_step(session_id, "REASONING_PROPOSAL_ACCEPTED", {
+                        "interpretation": (
+                            _reasoning.proposal.get("interpretation") or ""
+                        )[:500],
+                        "tools": [c.tool_name for c in _reasoning_calls],
+                        "not_affected": _reasoning.proposal.get("not_affected"),
+                        "uncertainty": _reasoning.proposal.get(
+                            "unresolved_uncertainty"
+                        ),
+                        "confirmation": _reasoning.proposal.get("confirmation"),
+                    })
+
+        from app.semantic_layer import extract_semantic_facts, normalize_to_erp
+        from app.planner import split_batch_request as _split_batch
+
+        _ai_prefill: Dict[str, Any] = {}
+        if (
+            not _split_batch(user_message)
+            and _reasoning_calls is None
+            and not (
+                _reasoning is not None
+                and _reasoning.usable
+                and _reasoning.status in (_R_NEEDS_INPUT, _R_COMPLETE, _R_REFUSAL)
+            )
+        ):
+            _semantic = await extract_semantic_facts(
+                user_message, orchestrator=get_client()
+            )
+            _ai_prefill = normalize_to_erp(_semantic)
+            if _semantic:
+                await _log_step(session_id, "AI_PERCEPTION", {
+                    "facts": sorted(_semantic.keys()),
+                    "intent": _ai_prefill.get("semantic_intent"),
+                    "ambiguous": bool(_semantic.get("ambiguous")),
+                    "source": "semantic_llm",
+                })
+        execution_plan = run_planner(
             user_message,
             clarification_history=prior_qa,
             org_preferences=org_prefs,
+            prefill_entities=_ai_prefill or None,
         )
-        _seg_gaps = [
-            f
-            for f in ("supplier_name", "customer_name", "item_description")
-            if not _probe_plan.extracted_entities.get(f)
-        ]
-        _segregated: Dict[str, Any] = {}
-        if _seg_gaps and not _probe_plan.batch_items:
-            from app.entity_segregation import segregate_entities
-
-            _segregated = await segregate_entities(
-                user_message, orchestrator=get_client()
-            )
-        if _segregated:
-            execution_plan = run_planner(
-                user_message,
-                clarification_history=prior_qa,
-                org_preferences=org_prefs,
-                prefill_entities=_segregated,
-            )
-            await _log_step(session_id, "ENTITY_SEGREGATION", {
-                "filled": sorted(_segregated.keys()),
-                "source": "grounded_llm",
-            })
-        else:
-            execution_plan = _probe_plan
         _phase_elapsed("planner.done", intent=execution_plan.intent)
 
         # Work Stream E: deterministic semantic tool shortlist.  Seeds the
@@ -1898,6 +2103,7 @@ async def execute(
         if (
             execution_plan.requires_clarification
             and len(prior_qa) < MAX_CLARIFICATION_ROUNDS
+            and _reasoning_calls is None
         ):
             from app.reasoning import plan_clarification_text
 
@@ -2027,10 +2233,27 @@ async def execute(
             entity_hints=entity_hints,
             clarification_history=prior_qa,
         )
+        # Work Stream S3 — the model's own reasoning products travel WITH the
+        # context so every later LLM call reassesses them instead of silently
+        # replacing them with a keyword route.
+        context.preliminary_extraction = dict(_preliminary or {})
+        if _reasoning is not None:
+            context.live_evidence = [
+                result.as_dict() for result in (_reasoning.evidence_results or [])
+            ]
+            context.accounting_reasoning = {
+                "status": _reasoning.status,
+                "understanding": _reasoning.understanding,
+                "proposal": _reasoning.proposal,
+                "evidence_summary": render_evidence_compact(
+                    _reasoning.evidence_results or []
+                ),
+            }
         await _log_step(session_id, "CONTEXT_LOADING", {
             "customers": len(context.relevant_customers),
             "suppliers": len(context.relevant_suppliers),
             "accounts": len(context.relevant_accounts),
+            "live_evidence": len(context.live_evidence),
         })
 
         _phase_elapsed("context.built")
@@ -2105,6 +2328,7 @@ async def execute(
         if (
             classification.requires_clarification
             and len(prior_qa) < MODEL_MAX_CLARIFICATION_ROUNDS
+            and _reasoning_calls is None
         ):
             if classification.transaction_nature:
                 # Configuration gap: the nature is decided (user answer /
@@ -2200,10 +2424,22 @@ async def execute(
         # found → the user confirms the new party ledger.  Never silently
         # invented.
         _phase_elapsed("party_question.start")
-        party_question = await _party_resolution_question(
-            organization_id=organization_id,
-            execution_plan=execution_plan,
-        )
+        party_question = None
+        if _reasoning_calls is None:
+            party_question = await _party_resolution_question(
+                organization_id=organization_id,
+                execution_plan=execution_plan,
+            )
+        else:
+            # A validated LLM accounting proposal already inspected the books
+            # and declared which records are — and are NOT — affected. Python
+            # does not re-invent a party requirement on top of that; it still
+            # enforces registry, permissions, constraints and the confirmation
+            # gate at execution time.
+            await _log_step(session_id, "GATE_SKIPPED", {
+                "gate": "party_resolution",
+                "reason": "validated LLM accounting proposal is in force",
+            })
         if party_question:
             party_required = party_question.get("required_fields") or [
                 "supplier_name"
@@ -2232,10 +2468,17 @@ async def execute(
         # never a second expense).  No unpaid payable → the fallback
         # re-picks the treatment.
         _phase_elapsed("settlement_question.start")
-        settlement_question = await _settlement_check_question(
-            organization_id=organization_id,
-            execution_plan=execution_plan,
-        )
+        settlement_question = None
+        if _reasoning_calls is None:
+            settlement_question = await _settlement_check_question(
+                organization_id=organization_id,
+                execution_plan=execution_plan,
+            )
+        else:
+            await _log_step(session_id, "GATE_SKIPPED", {
+                "gate": "settlement_check",
+                "reason": "validated LLM accounting proposal is in force",
+            })
         if settlement_question:
             settle_required = settlement_question.get("required_fields") or [
                 "settlement_check"
@@ -2265,10 +2508,17 @@ async def execute(
         # same way the party gate works — the user decides ONCE whether
         # the catalog grows; nothing is silently invented.
         _phase_elapsed("catalog_question.start")
-        catalog_question = await _catalog_check_question(
-            organization_id=organization_id,
-            execution_plan=execution_plan,
-        )
+        catalog_question = None
+        if _reasoning_calls is None:
+            catalog_question = await _catalog_check_question(
+                organization_id=organization_id,
+                execution_plan=execution_plan,
+            )
+        else:
+            await _log_step(session_id, "GATE_SKIPPED", {
+                "gate": "catalog_check",
+                "reason": "validated LLM accounting proposal is in force",
+            })
         if catalog_question:
             clarification = await create_clarification(
                 session_id=session_id,
@@ -2295,10 +2545,17 @@ async def execute(
         # A sale must never be booked to an arbitrary revenue account.  When the
         # item sold names a stream with no dedicated ledger, ASK — and create the
         # ledger on approval — BEFORE any execution.  Never assumes.
-        review = await _revenue_ledger_review_gate(
-            organization_id=organization_id,
-            execution_plan=execution_plan,
-        )
+        if _reasoning_calls is not None:
+            review = None
+            await _log_step(session_id, "GATE_SKIPPED", {
+                "gate": "revenue_ledger_review",
+                "reason": "validated LLM accounting proposal is in force",
+            })
+        else:
+            review = await _revenue_ledger_review_gate(
+                organization_id=organization_id,
+                execution_plan=execution_plan,
+            )
         if review is not None:
             # PERSIST the question — the answer round must find a pending
             # clarification row.  (Without this row the answer was silently
@@ -2334,6 +2591,18 @@ async def execute(
             deterministic_calls: Optional[List[ToolCall]] = list(approved_tool_calls)
             await _log_step(session_id, "APPROVED_PLAN_REUSED", {
                 "tools": [tc.tool_name for tc in deterministic_calls],
+            })
+        elif _reasoning_calls:
+            # The validated LLM accounting proposal IS the plan: the model
+            # inspected the live books, stated the interpretation, the affected
+            # records, the impact, what will NOT change and the uncertainty, and
+            # Python accepted it.  Execution still passes through the full
+            # security/validation/confirmation stack below.
+            deterministic_calls = list(_reasoning_calls)
+            execution_plan.requires_confirmation = True
+            await _log_step(session_id, "REASONING_PLAN_EXECUTION", {
+                "tools": [tc.tool_name for tc in deterministic_calls],
+                "source": "llm_accounting_reasoning",
             })
         else:
             deterministic_calls = await _deterministic_mutation_calls(
@@ -2444,12 +2713,21 @@ async def execute(
             and planned_tool_calls
             and not confirmation_granted
         ):
+            # When the plan came from the accounting reasoning layer, the user
+            # sees the MODEL's accounting disclosure (interpretation, affected
+            # records, impact, what will NOT change, uncertainty and the exact
+            # confirmation sentence) — not a keyword-intent summary.
+            _disclosure = _reasoning_disclosure(_reasoning)
             confirmation = await create_confirmation(
                 session_id=session_id,
                 action_type=execution_plan.intent,
                 description=(
-                    f"Execute: {execution_plan.intent}"
-                    f" — {execution_plan.entity_name or ''}"
+                    _disclosure.splitlines()[-1]
+                    if _disclosure
+                    else (
+                        f"Execute: {execution_plan.intent}"
+                        f" — {execution_plan.entity_name or ''}"
+                    )
                 ),
                 risk_level="MEDIUM",
                 # Snapshot the EXACT plan the user is approving (migration
@@ -2462,12 +2740,15 @@ async def execute(
                     for tc in planned_tool_calls
                 ],
             )
-            await _log_step(session_id, "AWAITING_CONFIRMATION", {"confirmation_id": confirmation.get("id")})
+            await _log_step(session_id, "AWAITING_CONFIRMATION", {
+                "confirmation_id": confirmation.get("id"),
+                "source": "llm_accounting_reasoning" if _disclosure else "plan",
+            })
             return AgentResponse(
                 status=ExecutionStatus.AWAITING_CONFIRMATION,
                 execution_id=session_id,
                 action=execution_plan.intent,
-                summary=_confirmation_summary(execution_plan),
+                summary=_disclosure or _confirmation_summary(execution_plan),
                 confirmation_required=True,
                 risk_level="MEDIUM",
             )

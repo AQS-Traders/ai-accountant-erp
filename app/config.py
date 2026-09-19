@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +20,23 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Paths
 # ---------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+# The constitution is the agent's binding governance document. It is loaded
+# as system-instruction material by BOTH the semantic understanding layer
+# (the reasoning rulebook) and the tool-planning prompt, so the lookup checks
+# the documented location as well as the repo root — a missing constitution
+# silently weakens the agent's reasoning, which must not depend on where the
+# file happens to sit.
 CONSTITUTION_PATH = PROJECT_ROOT / "ERP_AGENT_CONSTITUTION.md"
+CONSTITUTION_FALLBACK_PATH = PROJECT_ROOT / "docs" / "ERP_AGENT_CONSTITUTION.md"
+
+
+def constitution_path() -> Path:
+    """Resolve the constitution file (repo root first, then ``docs/``)."""
+    if CONSTITUTION_PATH.exists():
+        return CONSTITUTION_PATH
+    if CONSTITUTION_FALLBACK_PATH.exists():
+        return CONSTITUTION_FALLBACK_PATH
+    return CONSTITUTION_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -197,21 +213,101 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=10)
     database_max_overflow: int = Field(default=20)
 
-    # ---- Entity segregation (grounded LLM gap-filler) ---------------------
-    # The deterministic regex extractor only matches fixed phrasings. When it
-    # leaves the party/item unstated, ONE extra grounded LLM call segregates
-    # the user's own sentence; every value must appear verbatim in the text
-    # or it is discarded (app/entity_segregation.py).
-    entity_llm_fallback: bool = Field(
+    # ---- Semantic understanding layer (Work Stream S2) --------------------
+    # This is the PRIMARY semantic interpretation stage of the ERP: the user's
+    # natural-language request goes to the LLM FIRST, together with the
+    # reasoning rulebook and a bounded, organization-scoped ERP context
+    # package, and comes back as a grounded SemanticIntent (see
+    # app/semantic_layer.py, app/semantic_context.py, app/semantic_contract.py).
+    # The deterministic keyword extractor is the FALLBACK: when the provider
+    # is disabled, down, slow or returns unparseable output, the stage
+    # degrades to exactly the previous keyword behaviour.
+    semantic_llm_enabled: bool = Field(
         default=True,
-        description="Enable the grounded LLM entity-segregation gap-filler.",
+        description=(
+            "Enable the LLM semantic understanding layer (primary interpreter)."
+        ),
     )
-    entity_llm_timeout_seconds: float = Field(
-        default=6.0,
-        description="Wall-clock cap for the grounded entity-segregation call.",
+    semantic_llm_timeout_seconds: float = Field(
+        default=8.0,
+        description=(
+            "Wall-clock cap for the semantic understanding call. It runs before "
+            "planning, so the budget must leave room for the planning round."
+        ),
+    )
+    semantic_context_enabled: bool = Field(
+        default=True,
+        description=(
+            "Include the organization-scoped ERP context package (entities, "
+            "accounts, capabilities) in the semantic prompt."
+        ),
+    )
+    semantic_max_questions: int = Field(
+        default=3,
+        description=(
+            "Maximum AI-generated clarification questions accepted from the "
+            "semantic layer (targeted questions only — never a questionnaire)."
+        ),
+    )
+
+    # ---- LLM-primary accounting reasoning loop (Work Stream S3) ------------
+    # The LLM is the PRIMARY accounting reasoning layer: it inspects the live
+    # books (through the closed, permission-checked evidence catalog in
+    # app/books_evidence.py), reassesses the request against what the records
+    # actually contain, and decides the next step (contextual question,
+    # preparatory/correcting transaction, settlement, mutation, refusal).
+    # Python remains the enforcement layer (tools, permissions, confirmation,
+    # constraints, execution).  When the provider is unavailable the stage
+    # degrades to the previous deterministic behaviour — never to a guess.
+    accounting_reasoning_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable the LLM accounting-reasoning loop (primary reasoning "
+            "layer). Disabling it restores the previous deterministic "
+            "pipeline exactly."
+        ),
+    )
+    accounting_reasoning_timeout: float = Field(
+        default=12.0,
+        description=(
+            "Per-round wall-clock cap for the accounting reasoning call. The "
+            "loop runs before planning, so the budget must stay bounded."
+        ),
+    )
+    accounting_reasoning_max_rounds: int = Field(
+        default=3,
+        description=(
+            "Maximum reasoning rounds (evidence request → reassessment "
+            "→ decision). Bounded so a confused model can never loop."
+        ),
+    )
+
+    # Deprecated S1 names. They are still accepted (environment and tests) and
+    # resolved through the properties below; code must never read them
+    # directly, so the S2 role is never described as a "fallback".
+    entity_llm_fallback: Optional[bool] = Field(
+        default=None, description="Deprecated S1 alias for semantic_llm_enabled."
+    )
+    entity_llm_timeout_seconds: Optional[float] = Field(
+        default=None,
+        description="Deprecated S1 alias for semantic_llm_timeout_seconds.",
     )
 
     # ---- Helpers ---------------------------------------------------------
+    @property
+    def semantic_understanding_enabled(self) -> bool:
+        """Whether the semantic understanding layer runs (S2 or legacy alias)."""
+        if self.entity_llm_fallback is not None:
+            return bool(self.entity_llm_fallback)
+        return bool(self.semantic_llm_enabled)
+
+    @property
+    def semantic_understanding_timeout(self) -> float:
+        """Effective wall-clock budget for the semantic understanding call."""
+        if self.entity_llm_timeout_seconds is not None:
+            return float(self.entity_llm_timeout_seconds)
+        return float(self.semantic_llm_timeout_seconds)
+
     @property
     def cors_origin_list(self) -> List[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

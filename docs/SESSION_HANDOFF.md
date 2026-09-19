@@ -81,6 +81,68 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
 8. **Pre-existing invariants verified in the LIVE database**: no session with
    multiple pending clarifications (0), no duplicate active revenue accounts
    (0), no unbalanced posted journal entries (0).
+9. **Work Stream S3 — LLM-primary accounting reasoning (IMPLEMENTED, verified
+   this session).** The architectural correction: the LLM is now the primary
+   accounting reasoning layer and Python is only the enforcement/execution
+   layer. See `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md` for the full
+   contract. Summary:
+   * NEW `app/books_evidence.py` — a CLOSED, organization-scoped,
+     permission-checked read surface of **15 evidence kinds** covering every
+     accounting area (chart of accounts, subledgers, open receivables/
+     payables, documents, journals, fixed assets, catalog, bank accounts,
+     periods, policies, prior transactions, reports). Unknown kinds,
+     undeclared arguments, tenant selectors and wrong argument types are
+     refused and fed back; permission denial is returned as evidence;
+     loader failure is data; results are bounded.
+   * NEW `app/accounting_reasoning.py` — the bounded reasoning loop
+     (`accounting_reasoning_max_rounds`, default 3) with exactly one decision
+     per round: `NEEDS_EVIDENCE` → evidence returned → reassess →
+     `NEEDS_INPUT` / `PROPOSAL` / `REFUSAL` / `COMPLETE` / `UNSUPPORTED`.
+     Deterministic validation refuses an incomplete or disallowed decision and
+     feeds the reason BACK to the model (never repaired into a hardcoded
+     route). Also `preliminary_extraction()` — literals only, labelled
+     `PRELIMINARY EXTRACTION — may be corrected after accounting review`.
+   * `app/agent.py` — the loop runs BEFORE planning with the trusted tool
+     registry as the offered set; `REFUSAL → REJECTED`,
+     `COMPLETE → COMPLETED`, `NEEDS_INPUT → AWAITING_CLARIFICATION` (the
+     model's own question), an accepted `PROPOSAL` becomes the execution plan
+     (snapshot at the confirmation gate, executed only after approval through
+     the full security/validation stack). The user sees the MODEL's
+     accounting disclosure at confirmation (interpretation, affected records,
+     impact, what will NOT change, uncertainty, exact confirmation sentence).
+     The step log carries the whole reasoning trail.
+   * `app/prompts.py` — system instructions declare the LLM the primary
+     reasoning layer; context blocks are labelled `PRELIMINARY EXTRACTION`,
+     `LIVE BOOKS EVIDENCE`, `LLM ACCOUNTING REASONING`.
+   * `app/planner.py` — reduced to literal/candidate extraction: it reports
+     candidates and hints ONLY (no treatment, no account, no party
+     requirement, no workflow). 2193 added / 2149 removed lines.
+   * `app/reasoning.py`, `app/context_manager.py` — deliberately UNCHANGED:
+     they are the documented DEGRADATION path, used only when the provider is
+     unavailable, the answer is unparseable, or the request is a batch.
+     They no longer decide anything on the primary path.
+   * Tests: `app/tests/test_llm_primary_reasoning.py` (33 tests) pins the
+     contract, including: the same phrase yields a settlement with an open
+     bill and a question without one; an absent fixed asset yields a question,
+     never a disposal; an invented tool name never reaches a confirmation;
+     provider failure records nothing. **Full backend suite: 911 passed, 0
+     failures.**
+   * Fixed in this session: the constitution-cache regression
+     (`prompts.CONSTITUTION_PATH` now honours an explicit override while still
+     resolving the documented `docs/` location); the disclosure rule now
+     enforces PRESENCE (an explicit `unresolved_uncertainty: []` is a claim, an
+     omitted field is refused) instead of demanding non-empty lists; the
+     reasoning prompt now receives the trusted tool vocabulary (its
+     "only offered tools" enforcement was previously inert); a provider
+     EXCEPTION now degrades like a stall (honest `FAILED`, nothing recorded)
+     instead of surfacing a generic error; `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md`
+     created (it was referenced by three modules but did not exist); a dead
+     `return outcome` line removed; the stale `app/planner.py.bak_prefill`
+     deleted.
+   * STILL OPEN for this work stream: deploy the branch (the same procedure as
+     section C of "Remaining work" below) and run the production smoke test for
+     one disposal-type and one settlement-type request before declaring it
+     live.
 
 ## Remaining work (in priority order)
 
