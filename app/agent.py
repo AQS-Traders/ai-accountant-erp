@@ -1936,6 +1936,25 @@ async def execute(
                 rounds=_reasoning.rounds,
             )
 
+        # The provider was CALLED in this request and failed (timeout, error or
+        # unparseable answer).  Retrying the same chain twice more (perception,
+        # then planning) only multiplies the user-visible wait and risks a
+        # stale deterministic route.  The request is closed honestly instead.
+        _provider_down = bool(
+            _reasoning is not None
+            and _reasoning.provider_failed
+            and getattr(_reasoning, "provider_attempted", False)
+        )
+        if _provider_down:
+            await _log_step(session_id, "REASONING_DEGRADED", {
+                "reason": "provider_unavailable",
+                "rounds": _reasoning.rounds,
+                "note": (
+                    "the reasoning round failed; no second identical provider "
+                    "round-trip is attempted in this request"
+                ),
+            })
+
         if _reasoning is not None and not _reasoning.provider_failed:
             if _reasoning.status == _R_REFUSAL:
                 _text = _refusal_text(_reasoning.refusal) or (
@@ -2020,6 +2039,7 @@ async def execute(
         if (
             not _split_batch(user_message)
             and _reasoning_calls is None
+            and not _provider_down
             and not (
                 _reasoning is not None
                 and _reasoning.usable
@@ -2626,6 +2646,28 @@ async def execute(
             # so we can check the confirmation gate BEFORE executing anything.
             # The orchestrator dispatches to Qwen (primary) and falls back to
             # Gemini only on genuine provider failure.
+            if _provider_down:
+                # The SAME provider chain already failed the accounting
+                # reasoning round in this request.  A second (and third) attempt
+                # adds tens of seconds and can only produce a route that was not
+                # decided on the books — so the run stops honestly instead, with
+                # nothing recorded and every fact kept for the resend.
+                await _update_status(session_id, ExecutionStatus.FAILED)
+                await _log_step(session_id, "FAILED", {
+                    "reason": "provider_unavailable",
+                    "stage": "reasoning",
+                    "rounds": _reasoning.rounds,
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.FAILED,
+                    execution_id=session_id,
+                    summary=(
+                        "The AI provider did not answer in time. Nothing was "
+                        "recorded yet. Please send your request again — "
+                        "everything you have already told me is kept in this "
+                        "conversation."
+                    ),
+                )
             client = get_client()
             # Work Stream B tiered routing: simple lookup intents that reached
             # the model (the deterministic fast-path did not apply - ambiguous

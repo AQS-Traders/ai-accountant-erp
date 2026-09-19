@@ -837,8 +837,13 @@ def evidence_kind_names() -> List[str]:
     return sorted(EVIDENCE_KINDS)
 
 
-def evidence_catalog_text() -> str:
-    """The catalog shown to the model: which lookups exist and their args."""
+def evidence_catalog_text(description_limit: int = 96) -> str:
+    """The catalog shown to the model: which lookups exist and their args.
+
+    Descriptions are capped: the catalog is contract text the model must read on
+    every round, and the reasoning call is the slowest call in the pipeline — so
+    it stays informative without inflating the prompt.
+    """
     lines = [
         "EVIDENCE CATALOG (read-only lookups you may request; each is "
         "organization-scoped and permission-checked):"
@@ -846,7 +851,10 @@ def evidence_catalog_text() -> str:
     for kind in evidence_kind_names():
         spec = EVIDENCE_KINDS[kind]
         args = ", ".join(f"{name}:{typ}" for name, typ in spec.args.items()) or "no arguments"
-        lines.append(f"  - {spec.kind} — {spec.description} (args: {args})")
+        description = (spec.description or "").strip()
+        if len(description) > description_limit:
+            description = description[: description_limit - 1].rstrip() + "…"
+        lines.append(f"  - {spec.kind} — {description} (args: {args})")
     return "\n".join(lines)
 
 

@@ -49,6 +49,14 @@ MOTOR_BIKE = "record sale of fixed asset motor bike on cash for 56000"
 PAID_ABC = "paid 50,000 to ABC"
 
 
+class _NoChainSettings:
+    """Settings stub: standard provider chain, generous budgets."""
+
+    accounting_reasoning_timeout = 30.0
+    accounting_reasoning_total_timeout = 45.0
+    accounting_reasoning_model_chain = ""
+
+
 class ScriptedOrchestrator:
     """Returns scripted responses; picks the script matching the prompt.
 
@@ -62,9 +70,14 @@ class ScriptedOrchestrator:
         self.semantic = semantic
         self.boom = boom
         self.prompts = []
+        #: How many provider round-trips each interface received — lets a test
+        #: prove that a failed reasoning round is NOT retried twice more.
+        self.text_calls = 0
+        self.tools_calls = 0
 
     async def generate_text(self, *, prompt: str = ""):
         self.prompts.append(prompt)
+        self.text_calls += 1
         if self.boom:
             raise RuntimeError("provider down")
         if "PRIMARY ACCOUNTING REASONING LAYER" in prompt:
@@ -95,6 +108,7 @@ class ScriptedOrchestrator:
         outage has to surface here as well.
         """
         self.prompts.append(user_message)
+        self.tools_calls += 1
         if self.boom:
             raise RuntimeError("provider down")
         return {"text": "", "tool_calls": []}
@@ -711,6 +725,129 @@ class TestReasoningLoop:
         assert any("unresolved_uncertainty" in v for v in refused.violations)
 
     @pytest.mark.asyncio
+    async def test_round_timeout_is_attempted_and_bounded(self):
+        """The per-round cap must be enforced AND reported as a provider
+        ATTEMPT (so the caller never retries the same chain twice more)."""
+        import asyncio as _asyncio
+
+        class _Slow:
+            async def generate_text(self, *, prompt: str = ""):
+                await _asyncio.sleep(5)
+                return "{}"
+
+        started = _asyncio.get_running_loop().time()
+        outcome = await ar.run_reasoning_loop(
+            ar.ReasoningFacts(user_request=PAID_ABC),
+            organization_id=ORG,
+            orchestrator=_Slow(),
+            timeout_seconds=0.3,
+        )
+        elapsed = _asyncio.get_running_loop().time() - started
+        assert outcome.provider_failed is True
+        assert outcome.provider_attempted is True
+        assert outcome.rounds == 1
+        assert elapsed < 2.0, "the round cap was not enforced"
+        assert ar.proposed_mutation_tools(outcome) == []
+
+    @pytest.mark.asyncio
+    async def test_total_budget_caps_every_round_not_just_one(self, monkeypatch):
+        """Three slow rounds must not add up: the stage has a TOTAL budget."""
+        import asyncio as _asyncio
+
+        class _Slow:
+            async def generate_text(self, *, prompt: str = ""):
+                await _asyncio.sleep(0.25)
+                # Always ask for more evidence, so the loop wants 3 rounds.
+                return json.dumps(
+                    {"evidence_requests": [{"kind": "chart_of_accounts"}]}
+                )
+
+        class _Settings:
+            accounting_reasoning_timeout = 0.2
+            accounting_reasoning_total_timeout = 0.4
+
+        monkeypatch.setattr("app.config.get_settings", lambda: _Settings())
+        started = _asyncio.get_running_loop().time()
+        outcome = await ar.run_reasoning_loop(
+            ar.ReasoningFacts(user_request=PAID_ABC),
+            organization_id=ORG,
+            orchestrator=_Slow(),
+        )
+        elapsed = _asyncio.get_running_loop().time() - started
+        assert outcome.provider_failed is True
+        assert outcome.rounds < ar.MAX_REASONING_ROUNDS, (
+            "the loop kept spending rounds after the total budget was gone"
+        )
+        assert elapsed < 2.0
+
+    @pytest.mark.asyncio
+    async def test_configured_model_chain_is_passed_to_the_provider(self, monkeypatch):
+        """The reasoning round may name a faster model than the standard chain
+        (a thinking model dominates the latency of this stage)."""
+        seen = {}
+
+        class _Provider:
+            async def generate_text(self, *, prompt: str = "", model_chain=None):
+                seen["chain"] = model_chain
+                return json.dumps({"question": {"text": "Which period?"}})
+
+        class _Settings:
+            accounting_reasoning_timeout = 5.0
+            accounting_reasoning_total_timeout = 10.0
+            accounting_reasoning_model_chain = "qwen-max, qwen3.6-flash"
+
+        monkeypatch.setattr("app.config.get_settings", lambda: _Settings())
+        outcome = await ar.run_reasoning_loop(
+            ar.ReasoningFacts(user_request=PAID_ABC),
+            organization_id=ORG,
+            orchestrator=_Provider(),
+        )
+        assert outcome.status == ar.NEEDS_INPUT
+        assert seen["chain"] == ["qwen-max", "qwen3.6-flash"]
+
+    @pytest.mark.asyncio
+    async def test_default_chain_is_not_overridden(self, monkeypatch):
+        """With no dedicated chain configured, the provider contract is the
+        plain ``prompt`` kwarg (so any orchestrator keeps working)."""
+        seen = {}
+
+        class _Provider:
+            async def generate_text(self, *, prompt: str = ""):
+                seen["kwargs"] = "prompt-only"
+                return json.dumps({"question": {"text": "Which period?"}})
+
+        monkeypatch.setattr("app.config.get_settings", lambda: _NoChainSettings())
+        outcome = await ar.run_reasoning_loop(
+            ar.ReasoningFacts(user_request=PAID_ABC),
+            organization_id=ORG,
+            orchestrator=_Provider(),
+        )
+        assert outcome.status == ar.NEEDS_INPUT
+        assert seen["kwargs"] == "prompt-only"
+
+    @pytest.mark.asyncio
+    async def test_provider_without_chain_support_still_works(self, monkeypatch):
+        """A dedicated chain is only sent to providers that declare it — any
+        orchestrator (or double) with the plain ``prompt`` contract keeps
+        working, so the default can be a fast model without breaking callers."""
+        class _Provider:
+            async def generate_text(self, *, prompt: str = ""):
+                return json.dumps({"question": {"text": "Which period?"}})
+
+        class _ChainSettings:
+            accounting_reasoning_timeout = 5.0
+            accounting_reasoning_total_timeout = 10.0
+            accounting_reasoning_model_chain = "qwen-max"
+
+        monkeypatch.setattr("app.config.get_settings", lambda: _ChainSettings())
+        outcome = await ar.run_reasoning_loop(
+            ar.ReasoningFacts(user_request=PAID_ABC),
+            organization_id=ORG,
+            orchestrator=_Provider(),
+        )
+        assert outcome.status == ar.NEEDS_INPUT
+
+    @pytest.mark.asyncio
     async def test_refusal_is_fed_back_when_a_round_remains(self):
         orch = ScriptedOrchestrator(
             reasoning=[
@@ -864,6 +1001,32 @@ class TestPromptContract:
         assert "Do not invent missing facts" in text
         assert "Ask questions based on the actual records" in text
         assert text in build_system_instructions()
+
+    def test_reasoning_prompt_stays_within_its_latency_budget(self):
+        """The reasoning prompt is the PIPELINE'S SLOWEST call, and its size is
+        what the per-round budget has to cover. A prompt that quietly grows
+        re-introduces the timeout that silently disabled the reasoning layer."""
+        from app.tools import list_tools
+
+        facts = ar.ReasoningFacts(
+            user_request=MOTOR_BIKE,
+            preliminary=ar.preliminary_extraction(MOTOR_BIKE),
+        )
+        prompt = ar.build_reasoning_prompt(
+            facts, offered_tools=list(list_tools())
+        )
+        # Measured baseline after the latency fix: ~10.9 KB. The ceiling leaves
+        # little headroom on purpose — see the "Why the budget must exceed the
+        # provider's real latency" note in the architecture doc.
+        assert len(prompt) < 11500, f"reasoning prompt grew to {len(prompt)} chars"
+        for marker in (
+            "PRIMARY ACCOUNTING REASONING LAYER",
+            "EVIDENCE CATALOG",
+            "OFFERED TOOLS",
+            "HARD PROHIBITIONS",
+            "RESPONSE FORMAT",
+        ):
+            assert marker in prompt
 
     def test_user_content_labels_evidence_and_preliminary(self):
         from app.models.schemas import AgentContext
@@ -1208,10 +1371,10 @@ class TestAgentWiring:
         self, monkeypatch, boundary
     ):
         """A dead provider must never become a guessed accounting route: the
-        run stops honestly, and NOTHING is written."""
-        monkeypatch.setattr(
-            agent_mod, "get_client", lambda: ScriptedOrchestrator(boom=True)
-        )
+        run stops honestly, NOTHING is written, and the provider is not
+        hammered twice more in the same request."""
+        orch = ScriptedOrchestrator(boom=True)
+        monkeypatch.setattr(agent_mod, "get_client", lambda: orch)
         response = await agent_mod.execute(
             user_message=PAID_ABC, user_id=USER, organization_id=ORG
         )
@@ -1220,6 +1383,10 @@ class TestAgentWiring:
         assert boundary["tool_runs"] == []
         assert boundary["confirmations"] == []
         assert boundary["clarifications"] == []
+        # ONE provider attempt (the reasoning round) — the perception call and
+        # the planning call are skipped instead of adding two more waits.
+        assert orch.text_calls == 1
+        assert orch.tools_calls == 0
 
     @pytest.mark.asyncio
     async def test_refusal_is_reported_without_execution(self, monkeypatch, boundary):

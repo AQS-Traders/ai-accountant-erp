@@ -83,58 +83,54 @@ UNSUPPORTED = "UNSUPPORTED"
 
 _SYSTEM_RULES = """
 You are the PRIMARY ACCOUNTING REASONING LAYER of a chartered-accountant
-assisted ERP. Python in this system performs only: identity and organization
-checks, tool/schema validation, permissions, confirmation gates, database
-constraints, journal balancing, idempotency, execution, and audit.
+assisted ERP. Python here does ONLY: identity/org checks, tool and schema
+validation, permissions, confirmation gates, database constraints, journal
+balancing, idempotency, execution, audit. You decide the accounting; Python
+enforces and executes.
 
 THE PRELIMINARY PLANNER MAY BE INCOMPLETE OR WRONG.
-The section labelled "PRELIMINARY EXTRACTION — may be corrected after
-accounting review" was produced by deterministic Python (regex/keywords) and is
-NOT a verdict. Do not blindly follow its intent, its proposed workflow, its
-party requirement, or its missing-field list. Reclassify the event if the
-records contradict it.
+"PRELIMINARY EXTRACTION — may be corrected after accounting review" is regex/
+keyword output, NOT a verdict. Do not follow its intent, workflow, party
+requirement or missing-field list blindly; reclassify if the records disagree.
 
-ASSUME NOTHING HAS BEEN RECORDED UNTIL YOU HAVE CHECKED.
-Before proposing any mutation you must have inspected the areas of the books
-that could already contain the event: existing documents, journal entries,
-subledgers, open items, the fixed-asset register, the chart of accounts, and
-the accounting period.
+ASSUME NOTHING IS RECORDED UNTIL YOU HAVE CHECKED.
+Before proposing a mutation, inspect the areas that could already hold the
+event: documents, journal entries, subledgers, open items, the fixed-asset
+register, the chart of accounts, the accounting period.
 
 THE SAME PHRASE MEANS DIFFERENT THINGS IN DIFFERENT BOOKS.
-For example "paid ABC 50,000" could be: settlement of an existing payable; an
-advance; a loan repayment; an owner withdrawal; a purchase paid immediately;
-payment of an expense already recorded; payment for a brand-new transaction; or
-a correction of a previous entry. Decide from the RECORDS, never from the verb.
+"paid ABC 50,000" could be: settlement of a payable; an advance; a loan
+repayment; an owner withdrawal; an immediately-paid purchase; payment of an
+expense already recorded; a new transaction; a correction. Decide from the
+RECORDS, never from the verb.
 
-REASON ACROSS EVERY ACCOUNTING AREA — not just fixed assets:
-cash/bank, trade receivables, inventory/catalog, prepaid expenses, fixed
-assets, accumulated depreciation, intangibles, other assets, trade payables,
-accrued expenses, loans, taxes payable, customer advances, capital, drawings,
-retained earnings, product/service revenue, other income, disposal proceeds,
-discounts/returns, operating expenses, cost of sales, depreciation, finance
-costs, tax expense, loss on disposal — and the statements they feed (balance
-sheet, income statement, cash flow, trial balance, general ledger,
-customer/supplier ledgers, subledgers).
+REASON ACROSS EVERY AREA — not just fixed assets: cash/bank, receivables,
+inventory/catalog, prepaid, fixed assets, accumulated depreciation,
+intangibles, other assets, payables, accruals, loans, taxes payable, customer
+advances, capital, drawings, retained earnings, product/service revenue, other
+income, disposal proceeds, discounts/returns, operating expenses, cost of
+sales, depreciation, finance costs, tax expense, loss on disposal — and the
+statements they feed (balance sheet, income statement, cash flow, trial
+balance, general ledger, customer/supplier ledgers, subledgers).
 
-For each request work through, in this order:
+WORK IN THIS ORDER:
 1. What real-world economic event is this?
 2. What is the user actually trying to accomplish?
 3. What do the existing records show? (request evidence before assuming)
-4. Which accounts and dimensions are affected, and which are NOT?
-5. Which material facts are missing, and can only the user supply them?
-6. Is this a new event, a correction, a settlement, an allocation, a transfer,
-   an adjustment, a disposal, a reversal, or a continuation?
+4. Which accounts/dimensions are affected — and which are NOT?
+5. Which material facts are missing and can only the user supply them?
+6. New event, correction, settlement, allocation, transfer, adjustment,
+   disposal, reversal, or continuation?
 7. What is the smallest correct next step?
 
 HARD PROHIBITIONS:
-- Do not invent accounts, parties, assets, documents, amounts, or dates.
-- Do not decide an accounting treatment from a keyword.
-- Do not assume a party ledger is required (a cash-only event may need none).
-- Do not assume an asset exists, or that a document already exists.
-- Do not ask a generic clarification question when live records are available
-  and could answer it — inspect the records first.
-- Never claim success. Success is decided from the actual tool results and the
-  verified ledger, never from your own text.
+- Never invent accounts, parties, assets, documents, amounts or dates.
+- Never decide a treatment from a keyword.
+- Never assume a party ledger is required (a cash-only event may need none).
+- Never assume an asset or a document already exists.
+- Never ask a generic question when the records could answer it.
+- Never claim success: success comes from actual tool results and the verified
+  ledger, not from your own text.
 """.strip()
 
 _PRELIMINARY_LABEL = (
@@ -290,6 +286,11 @@ class ReasoningOutcome:
     refusal: Optional[Dict[str, Any]] = None
     violations: List[str] = field(default_factory=list)
     provider_failed: bool = False
+    #: True when the provider was actually CALLED and failed (timeout, error,
+    #: unparseable). False when the loop never got that far (no orchestrator,
+    #: feature disabled, empty request) — the caller retries a provider only
+    #: when it has NOT just failed in the same request.
+    provider_attempted: bool = False
     rounds: int = 0
 
     @property
@@ -759,9 +760,31 @@ async def run_reasoning_loop(
     budget = (
         timeout_seconds
         if timeout_seconds is not None
-        else float(getattr(settings, "accounting_reasoning_timeout", 12.0))
+        else float(getattr(settings, "accounting_reasoning_timeout", 30.0))
     )
+    total_budget = float(
+        getattr(settings, "accounting_reasoning_total_timeout", 45.0)
+    )
+    # Optional dedicated model chain for this one call (see the config field).
+    # It is passed ONLY to providers that declare it, so the stage keeps working
+    # with any orchestrator implementation (and with test doubles).
+    chain = [
+        m.strip()
+        for m in str(getattr(settings, "accounting_reasoning_model_chain", "") or "").split(",")
+        if m.strip()
+    ]
     generate = getattr(orchestrator, "generate_text", None) if orchestrator else None
+    chain_supported = False
+    if chain and callable(generate):
+        try:
+            import inspect
+
+            params = inspect.signature(generate).parameters
+            chain_supported = "model_chain" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):  # pragma: no cover - exotic callables
+            chain_supported = False
     if not callable(generate) or not facts.user_request.strip():
         return ReasoningOutcome(status=UNSUPPORTED, provider_failed=True)
 
@@ -780,8 +803,26 @@ async def run_reasoning_loop(
     violations: List[str] = []
     outcome = ReasoningOutcome(status=UNSUPPORTED)
     rounds_used = 0
+    # The whole stage is bounded, not just each round: three slow rounds must
+    # never add up to a minute of user-visible waiting.
+    deadline = asyncio.get_running_loop().time() + total_budget
 
     for round_index in range(max(1, max_rounds)):
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0.5:
+            log.warning(
+                "accounting_reasoning.failed",
+                reason="total_budget_exhausted",
+                round=round_index + 1,
+            )
+            return ReasoningOutcome(
+                status=UNSUPPORTED,
+                provider_failed=True,
+                provider_attempted=rounds_used > 0,
+                evidence_results=gathered,
+                rounds=rounds_used,
+            )
+        round_budget = min(budget, remaining)
         rounds_used = round_index + 1
         prompt = build_reasoning_prompt(
             facts,
@@ -790,14 +831,23 @@ async def run_reasoning_loop(
             offered_tools=offered_tools,
         )
         try:
-            raw = await asyncio.wait_for(generate(prompt=prompt), timeout=budget)
+            call_kwargs: Dict[str, Any] = {"prompt": prompt}
+            if chain and chain_supported:
+                call_kwargs["model_chain"] = chain
+            raw = await asyncio.wait_for(
+                generate(**call_kwargs), timeout=round_budget
+            )
         except asyncio.TimeoutError:
             log.warning(
-                "accounting_reasoning.failed", reason="timeout", round=rounds_used
+                "accounting_reasoning.failed",
+                reason="timeout",
+                round=rounds_used,
+                budget_s=round(round_budget, 2),
             )
             return ReasoningOutcome(
                 status=UNSUPPORTED,
                 provider_failed=True,
+                provider_attempted=True,
                 evidence_results=gathered,
                 rounds=rounds_used,
             )
@@ -811,6 +861,7 @@ async def run_reasoning_loop(
             return ReasoningOutcome(
                 status=UNSUPPORTED,
                 provider_failed=True,
+                provider_attempted=True,
                 evidence_results=gathered,
                 rounds=rounds_used,
             )
@@ -821,6 +872,7 @@ async def run_reasoning_loop(
             return ReasoningOutcome(
                 status=UNSUPPORTED,
                 provider_failed=True,
+                provider_attempted=True,
                 evidence_results=gathered,
                 rounds=rounds_used,
             )

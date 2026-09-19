@@ -268,10 +268,38 @@ class Settings(BaseSettings):
         ),
     )
     accounting_reasoning_timeout: float = Field(
-        default=12.0,
+        default=30.0,
         description=(
-            "Per-round wall-clock cap for the accounting reasoning call. The "
-            "loop runs before planning, so the budget must stay bounded."
+            "Per-round wall-clock cap for the accounting reasoning call. "
+            "MEASURED: the reasoning prompt is the largest call in the "
+            "pipeline (~12 KB: rules + evidence catalog + the trusted tool "
+            "vocabulary), and the provider needs 6-25s for it — the earlier "
+            "12s cap made the FIRST round time out on every request, which "
+            "silently degraded every request to the legacy route. Keep this "
+            "above the provider's real latency."
+        ),
+    )
+    accounting_reasoning_total_timeout: float = Field(
+        default=45.0,
+        description=(
+            "Wall-clock cap for the WHOLE reasoning loop (all rounds). A "
+            "per-round cap alone lets three slow rounds add up; this bounds "
+            "the stage the user waits on before the pipeline degrades."
+        ),
+    )
+    accounting_reasoning_model_chain: str = Field(
+        default="qwen-max",
+        description=(
+            "Comma-separated model chain for the reasoning round ONLY. "
+            "MEASURED on the live provider (ap-southeast-1): qwen-max answered "
+            "the ~11 KB reasoning prompt in 12.2s with the correct decision "
+            "(event_type=disposal + a fixed_assets evidence request), while the "
+            "standard chain's first model (qwen3.6-plus, a thinking model) took "
+            ">35s — which is why the old 12s cap timed the round out on every "
+            "request and silently degraded the pipeline to keyword routing. "
+            "Set to an empty string to use the standard qwen_model_chain; a "
+            "chain naming a model the deployment does not have falls back to "
+            "the standard chain."
         ),
     )
     accounting_reasoning_max_rounds: int = Field(

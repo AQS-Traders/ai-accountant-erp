@@ -139,6 +139,30 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
      created (it was referenced by three modules but did not exist); a dead
      `return outcome` line removed; the stale `app/planner.py.bak_prefill`
      deleted.
+   * LATENCY DEFECT FOUND AND FIXED IN THE PREVIEW (measured). The per-round
+     reasoning budget was **12s**, but the ~11 KB reasoning prompt needs longer:
+     the live step log showed round 1 hitting the cap at **12.09s on every
+     request** (`provider_failed: true, rounds: 1`), so the reasoning layer
+     silently degraded and the legacy keyword route answered — for
+     "record sale of fixed asset car on cash for 570000" it proposed
+     `register_fixed_asset` (an ACQUISITION) after ~35-40s. Fixes:
+     - `accounting_reasoning_timeout` 12s → **30s**, plus a NEW
+       `accounting_reasoning_total_timeout` (45s) bounding all rounds.
+     - NEW `accounting_reasoning_model_chain`, default **`qwen-max`**: measured
+       against the live provider, `qwen-max` answered the reasoning prompt in
+       **12.2s** with the correct decision (`event_type=disposal` + a
+       `fixed_assets` evidence request), while the standard chain's first model
+       (`qwen3.6-plus`, a thinking model) took **>35s**. Passed only to
+       providers that declare the parameter, so nothing else breaks.
+     - `provider_attempted` on the reasoning outcome: after a REAL provider
+       failure the agent no longer fires the same chain twice more (perception,
+       then planning) in one request — it stops honestly (`FAILED`, nothing
+       recorded) unless the deterministic path can serve the request.
+     - Prompt trimmed to ~10.9 KB and guarded by a test so the budget can never
+       be silently outgrown again.
+     - `app/tests/test_ledger_confirmation_flow.py` made HERMETIC (it was
+       calling the live provider and reading the live DB); the suite is now 3x
+       faster (30s vs 108s). **Full backend suite: 917 passed, 0 failures.**
    * STILL OPEN for this work stream: deploy the branch (the same procedure as
      section C of "Remaining work" below) and run the production smoke test for
      one disposal-type and one settlement-type request before declaring it

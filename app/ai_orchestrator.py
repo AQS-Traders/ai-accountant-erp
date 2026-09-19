@@ -277,9 +277,21 @@ class AIOrchestrator:
         *,
         prompt: str,
         context: Optional[AgentContext] = None,
+        model_chain: Optional[List[str]] = None,
     ) -> str:
-        """Plain text generation across the same capability chain."""
-        for candidate in self._candidate_providers(requires_vision=False):
+        """Plain text generation across the same capability chain.
+
+        ``model_chain`` restricts/orders the Qwen candidates for THIS call — the
+        accounting-reasoning stage uses it to name a faster model than the
+        standard chain when the reasoning round is the slow part of a request.
+        """
+        candidates = self._candidate_providers(requires_vision=False)
+        if model_chain:
+            allowed = [m for m in model_chain if m]
+            candidates = [c for c in candidates if c["model"] in allowed] or candidates
+            rank = {name: idx for idx, name in enumerate(allowed)}
+            candidates.sort(key=lambda c: rank.get(c["model"], len(rank)))
+        for candidate in candidates:
             name = candidate["provider"]
             model = candidate["model"]
             try:

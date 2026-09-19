@@ -149,10 +149,29 @@ Execution rules (`gather_evidence`):
 
 ## 6. The reasoning loop contract
 
-`run_reasoning_loop(facts, …)` is bounded by `max_rounds`
-(`accounting_reasoning_max_rounds`, default 3) and a per-round wall clock
-(`accounting_reasoning_timeout`, default 12s). Each round the model returns
+`run_reasoning_loop(facts, …)` is bounded by TWO budgets — a per-round wall
+clock (`accounting_reasoning_timeout`, default 30 s) and a whole-stage cap
+(`accounting_reasoning_total_timeout`, default 45 s), so three slow rounds can
+never add up to a minute of user-visible waiting. Each round the model returns
 **exactly one** decision, in this precedence:
+
+### Why the budget must exceed the provider's real latency (measured defect)
+
+The reasoning prompt is the LARGEST call in the pipeline — ~11.7 KB: the rules,
+the evidence catalog and the trusted tool vocabulary (59 tool names). Failure
+mode observed in production before this was fixed: the per-round cap was 12 s
+while the provider needs longer than that for a prompt this size, so **round 1
+timed out on every request** (`provider_failed: true, rounds: 1` — the step log
+showed a 12.09 s gap), the loop degraded, and the legacy pipeline then decided
+the treatment from keywords (for `record sale of fixed asset car on cash for
+570000` it proposed `register_fixed_asset`, i.e. an ACQUISITION). The user paid
+~35-40 s for a wrong route. A budget below the provider's latency is therefore a
+correctness bug, not just a performance one: it silently disables the reasoning
+layer.
+
+When the provider IS actually unavailable that fact is recorded
+(`provider_attempted=True`) and the same provider chain is **not** retried twice
+more in the same request (see §8).
 
 | Status | Meaning | Agent reaction |
 | --- | --- | --- |
@@ -232,7 +251,7 @@ registry's own `read_only` flag — never the model's description of a tool.
 | Situation | Behaviour |
 | --- | --- |
 | Reasoning disabled (`accounting_reasoning_enabled=false`) | the previous deterministic pipeline runs unchanged |
-| Provider unavailable / timeout / unparseable | `provider_failed` → the previous pipeline runs; no decision is invented |
+| Provider unavailable / timeout / unparseable | `provider_failed` + `provider_attempted` → the pipeline does NOT fire two more identical provider calls (perception, then planning). It stops honestly: `FAILED`, nothing recorded, the user is told to resend and every fact is kept |
 | Provider unavailable on the **planning/execution** call | honest `FAILED` response, nothing recorded, the user is told to resend; earlier work is kept |
 | Batch request | handled by the existing batch path (unchanged) |
 
@@ -294,8 +313,10 @@ it is a correction, accrual, reclassification, reversal or estimate.
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `accounting_reasoning_enabled` | `True` | run the loop; `false` restores the previous pipeline exactly |
-| `accounting_reasoning_timeout` | `12.0` | per-round wall-clock cap (the loop runs before planning, so it stays bounded) |
+| `accounting_reasoning_timeout` | `30.0` | per-round wall-clock cap. Must stay **above the provider's real latency** for the ~12 KB prompt, otherwise every round times out and the reasoning layer is silently disabled (measured defect: 12 s → always timed out) |
+| `accounting_reasoning_total_timeout` | `45.0` | cap for the whole loop (all rounds) |
 | `accounting_reasoning_max_rounds` | `3` | evidence request → reassessment → decision budget |
+| `qwen_model_chain` | `qwen3.6-plus,qwen-max` | the reasoning round is the first call of a request, so it pays the cold-start cost; a faster first model shortens the whole stage |
 
 
 ## 11. Tests that pin this contract
