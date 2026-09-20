@@ -316,10 +316,52 @@ it is a correction, accrual, reclassification, reversal or estimate.
 | `accounting_reasoning_timeout` | `30.0` | per-round wall-clock cap. Must stay **above the provider's real latency** for the ~12 KB prompt, otherwise every round times out and the reasoning layer is silently disabled (measured defect: 12 s → always timed out) |
 | `accounting_reasoning_total_timeout` | `45.0` | cap for the whole loop (all rounds) |
 | `accounting_reasoning_max_rounds` | `3` | evidence request → reassessment → decision budget |
-| `qwen_model_chain` | `qwen3.6-plus,qwen-max` | the reasoning round is the first call of a request, so it pays the cold-start cost; a faster first model shortens the whole stage |
+| `accounting_reasoning_model_chain` | `qwen3-max,qwen-max` | the **DEEP tier** for the reasoning rounds (see 10.1) |
+| `qwen_model_chain` | `qwen-max,qwen3-max,qwen3.6-plus` | the **STANDARD chain** for tool planning, ordered by MEASURED latency for the same 2-tool request |
+| `accounting_fast_model_chain` | `qwen3-30b-a3b-instruct-2507,qwen-flash,qwen-max` | the **FAST tier** for MECHANICAL stages only; the value `standard` disables the tier |
+
+### 10.1 Model tiers (measured, 2026-09-20)
+
+The workspace endpoint is an **aggregated** catalog (Qwen + DeepSeek + Kimi +
+GLM, 169 models). Each stage was probed with ITS OWN real prompt, because the
+stages do not do the same work and therefore do not need the same model:
+
+| Tier | Setting | Used by | Measured evidence |
+| --- | --- | --- | --- |
+| **Deep** | `accounting_reasoning_model_chain` | the accounting-reasoning rounds | `qwen3-max,qwen-max` answered the real ~10.9 KB reasoning prompt with the CORRECT disposal decision (`event_type=disposal` + a `fixed_assets` evidence request) in **~10.7 s** |
+| **Standard** | `qwen_model_chain` | tool planning / the agent loop | `qwen-max` returned correct tool calls in **3.75 s** where the previous head `qwen3.6-plus` (a thinking model) took **8.12 s** |
+| **Fast** | `accounting_fast_model_chain` | mechanical stages only: semantic fact extraction, entity perception | `qwen3-30b-a3b-instruct-2507` extracted the same 10.9 KB text in **9.8 s** where `qwen3.6-plus` took **57.8 s**; the 2-tool request took 3.47 s vs 8.12 s |
+
+Invariants the tiering must keep:
+
+* the fast tier is reachable **only** through
+  `AIOrchestrator.generate_text_light`, which the mechanical stages call; the
+  reasoning rounds call `generate_text` with the deep chain, so a cheap
+  mechanical model can never decide accounting;
+* the requested chain **is** the candidate list — the orchestrator does not
+  filter the standard chain by it, otherwise a tier model the standard chain
+  does not contain collapses to the standard chain and the tiering is inert;
+* `ACCOUNTING_FAST_MODEL_CHAIN=standard` switches the tier off with one
+  variable. A BLANK value cannot do it: `Settings._empty_env_means_unset`
+  removes blank values (the serverless deploy fix), so the default fast chain
+  applies and the tier stays on;
+* a banned model (`qwen3.7-plus`) can never enter any tier, and a tier value
+  that names no usable model degrades to the standard chain;
+* a tier model the provider does not serve fails **only its own candidate**:
+  the rest of the chain, then Gemini, still run.
 
 
 ## 11. Tests that pin this contract
+
+`app/tests/test_model_tiers.py` pins the TIER MECHANISM (no network): the
+shipped defaults are the measured models (read from the field definitions, so a
+local `.env` cannot mask a regression), `standard` disables the fast tier while
+a blank value does not, banned models never enter a tier, a tier model outside
+the standard chain is still used, the chain order is honoured, an unknown model
+fails only its own candidate, mechanical extraction calls the light entry point
+(and still works without it), and the client learns per-model parameter quirks
+(`kimi-k3` rejects `temperature`, small Qwen3 models require
+`enable_thinking=false`).
 
 `app/tests/test_llm_primary_reasoning.py` (the LLM is a scripted provider —
 the CONTRACT is what is pinned, not a live model's behaviour):

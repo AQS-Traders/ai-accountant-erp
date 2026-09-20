@@ -77,6 +77,12 @@ class QwenClient:
         self.max_output_tokens = max_output_tokens
         self._timeout = httpx.Timeout(timeout_seconds, connect=15.0)
 
+        # Parameter quirks discovered for THIS model at runtime (see
+        # ``_payload`` / ``_quirk_from_error``): the aggregated catalog does not
+        # accept one common parameter set, so a 400 that names an unsupported
+        # parameter teaches the client to omit it for every later call.
+        self._param_quirks: set = set()
+
         # Shared prompt pipeline — identical to Gemini's.
         self._constitution = load_constitution()
         self._system_instructions = build_system_instructions(self._constitution)
@@ -300,12 +306,9 @@ class QwenClient:
                 resp = await client.post(
                     f"{self.base_url}/chat/completions",
                     headers=self._headers(),
-                    json={
-                        "model": self.model_name,
-                        "messages": [{"role": "user", "content": "ping"}],
-                        "max_tokens": 1,
-                        "temperature": 0,
-                    },
+                    json=self._payload(
+                        [{"role": "user", "content": "ping"}], None, 1
+                    ),
                 )
             if resp.status_code == 200:
                 return {"ok": True, "detail": f"{self.model_name} reachable"}
@@ -326,6 +329,53 @@ class QwenClient:
             "Content-Type": "application/json",
         }
 
+    def _payload(
+        self,
+        messages: List[Dict[str, Any]],
+        tools_payload: Optional[List[Dict[str, Any]]],
+        max_output_tokens: Optional[int],
+    ) -> Dict[str, Any]:
+        """Build the request body, honouring this model's known quirks.
+
+        The workspace exposes an AGGREGATED catalog (Qwen + DeepSeek + Kimi +
+        GLM) and the members do NOT accept the same parameters. Probing them
+        showed, concretely: ``kimi-k3`` rejects ``temperature`` outright
+        ("Parameter 'temperature'=0.1 is not supported for kimi-k3 model")
+        and Qwen3 small models answer
+        "parameter.enable_thinking must be set to false for non-streaming
+        calls". Without the quirk handling below those models fail on EVERY
+        call, which would have made a third of the measured-fast catalog
+        unusable.
+        """
+        payload: Dict[str, Any] = {
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": max_output_tokens or self.max_output_tokens,
+        }
+        if "no_temperature" not in self._param_quirks:
+            payload["temperature"] = self.temperature
+        if "thinking_off" in self._param_quirks:
+            payload["enable_thinking"] = False
+        if tools_payload:
+            payload["tools"] = tools_payload
+            payload["tool_choice"] = "auto"
+        return payload
+
+    @staticmethod
+    def _quirk_from_error(body: str) -> Optional[str]:
+        """Map a provider 400 to the parameter quirk that caused it.
+
+        Returns None when the error is NOT a parameter-capability problem, so
+        genuine failures still surface as ProviderError and reach the caller's
+        fallback logic.
+        """
+        low = (body or "").lower()
+        if "temperature" in low and "not supported" in low:
+            return "no_temperature"
+        if "enable_thinking" in low and "must be set to false" in low:
+            return "thinking_off"
+        return None
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -337,15 +387,7 @@ class QwenClient:
         tools_payload: Optional[List[Dict[str, Any]]],
         max_output_tokens: Optional[int] = None,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": self.temperature,
-            "max_tokens": max_output_tokens or self.max_output_tokens,
-        }
-        if tools_payload:
-            payload["tools"] = tools_payload
-            payload["tool_choice"] = "auto"
+        payload = self._payload(messages, tools_payload, max_output_tokens)
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -357,6 +399,23 @@ class QwenClient:
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             log.warning("qwen_client.transport_error", error=str(exc))
             raise ProviderError(f"Qwen endpoint unreachable: {exc}") from exc
+
+        if resp.status_code == 400:
+            quirk = self._quirk_from_error(resp.text)
+            if quirk and quirk not in self._param_quirks:
+                # Remember the quirk for this client instance and retry ONCE
+                # without the offending parameter. This is capability
+                # discovery, not a silent retry: it is logged, it is bounded
+                # by the quirk set, and anything else still raises below.
+                self._param_quirks.add(quirk)
+                log.info(
+                    "qwen_client.parameter_quirk",
+                    model=self.model_name,
+                    quirk=quirk,
+                )
+                return await self._chat_completion(
+                    messages, tools_payload, max_output_tokens
+                )
 
         if resp.status_code != 200:
             log.warning(

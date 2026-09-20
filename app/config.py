@@ -132,14 +132,27 @@ class Settings(BaseSettings):
     # Ordered fallback chain of ERP-capable Qwen models (text + tool-calling).
     # NOTE: qwen3.7-plus is BANNED from the active chain (constitution rule);
     # qwen-plus-2025-07-28 does NOT exist on the workspace (stale reference).
+    #
+    # MEASURED 2026-09-20 on this workspace endpoint, same 2-tool request
+    # ("look up supplier ABC and its open payables"):
+    #     qwen3-30b-a3b-instruct-2507  3.47s   correct tool calls
+    #     qwen-max                     3.75s   correct tool calls
+    #     qwen-flash                   6.19s   correct tool calls
+    #     qwen3.6-plus                 8.12s   correct tool calls (THINKING)
+    #     qwen3-next-80b-a3b-instruct  9.12s   correct tool calls
+    #     qwen3-max                    9.11s   correct tool calls
+    # qwen3.6-plus was the previous head of this chain: it is a THINKING model
+    # that emits reasoning tokens before every answer, so it was the slowest
+    # viable option for tool planning while adding no capability the others
+    # lack.  It stays in the chain as a last Qwen resort before Gemini.
     qwen_model_chain: str = Field(
-        default="qwen3.6-plus,qwen-max",
+        default="qwen-max,qwen3-max,qwen3.6-plus",
         description=(
-            "Ordered Qwen fallback chain for text/tool ERP requests. Trimmed "
-            "from 4 models to 2: the orchestrator ALREADY falls back to Gemini "
-            "after this chain, so extra Qwen entries only multiplied the "
-            "worst-case time (3-4 models x internal retries x timeout) without "
-            "adding a distinct provider."
+            "Ordered Qwen fallback chain for text/tool ERP requests. Ordered "
+            "by MEASURED latency for the same tool-calling task (see above); "
+            "the orchestrator ALREADY falls back to Gemini after this chain, "
+            "so extra Qwen entries only multiply the worst-case time (models x "
+            "internal retries x timeout) without adding a distinct provider."
         ),
     )
     qwen_vision_model_chain: str = Field(
@@ -288,18 +301,20 @@ class Settings(BaseSettings):
         ),
     )
     accounting_reasoning_model_chain: str = Field(
-        default="qwen-max",
+        default="qwen3-max,qwen-max",
         description=(
-            "Comma-separated model chain for the reasoning round ONLY. "
-            "MEASURED on the live provider (ap-southeast-1): qwen-max answered "
-            "the ~11 KB reasoning prompt in 12.2s with the correct decision "
-            "(event_type=disposal + a fixed_assets evidence request), while the "
-            "standard chain's first model (qwen3.6-plus, a thinking model) took "
-            ">35s — which is why the old 12s cap timed the round out on every "
-            "request and silently degraded the pipeline to keyword routing. "
-            "Set to an empty string to use the standard qwen_model_chain; a "
-            "chain naming a model the deployment does not have falls back to "
-            "the standard chain."
+            "Comma-separated model chain for the accounting reasoning rounds "
+            "(the deep tier). MEASURED 2026-09-20 against the REAL 10.9 KB "
+            "reasoning prompt on the live workspace endpoint, using the "
+            "disposal case: qwen-max 10.67s and qwen3-max 10.75s both returned "
+            "the correct decision (event_type=disposal + a fixed_assets "
+            "evidence request); qwen3.7-max 18.6s; deepseek-v4-pro 30.4s; "
+            "qwen3.6-plus 57.8s (10 304 thinking chars); qwen3.8-2.4t-a95b "
+            "61.5s; qwen3.8-max timed out past 61s. The previous default "
+            "(qwen-max alone) is kept as the second entry for quota/pacing "
+            "redundancy. Set to an empty string to use the standard "
+            "qwen_model_chain; a chain naming a model the deployment does not "
+            "have falls back to the standard chain."
         ),
     )
     accounting_reasoning_max_rounds: int = Field(
@@ -307,6 +322,49 @@ class Settings(BaseSettings):
         description=(
             "Maximum reasoning rounds (evidence request → reassessment "
             "→ decision). Bounded so a confused model can never loop."
+        ),
+    )
+    # ---------------------------------------------------------------------
+    # MODEL TIERS (measured, 2026-09-20)
+    #
+    # The workspace endpoint is an AGGREGATED catalog (169 models: Qwen 3.8,
+    # DeepSeek v4, Kimi, GLM). Probing every reachable model showed the tier
+    # boundaries are NOT where the marketing names suggest: a small instruct
+    # model answers a mechanical extraction FASTER than a "plus" model, while
+    # the classic flagship answers the hardest accounting question as fast as
+    # anything else. Full table: docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md.
+    #
+    #   tier          | measured winner                        | use
+    #   fast          | qwen3-30b-a3b-instruct-2507   3.5-10s | extraction,
+    #                 | qwen-flash / qwen3-next-80b-a3b       | perception,
+    #                 |                                       | classification
+    #   standard      | qwen-max                      3.8-11s | tool planning
+    #   deep          | qwen3-max / qwen-max          10.7s   | accounting
+    #                 |                                       | reasoning
+    #
+    # MODELS THAT MISCLASSIFIED the disposal test (do NOT put them on the
+    # accounting reasoning path): qwen3.7-flash and deepseek-v4-flash both
+    # returned event_type=new_event for "record sale of fixed asset ...".
+    # MODELS THAT ARE TOO SLOW for an interactive request on the reasoning
+    # prompt: qwen3.6-plus 57.8s, qwen3.8-2.4t-a95b 61.5s, qwen3.8-max >61s.
+    # MODELS THAT REJECT parameters (handled by the client's tolerant
+    # retry): kimi-k3 rejects `temperature`; qwen3-14b requires
+    # `enable_thinking=false` for non-streaming calls.
+    # ---------------------------------------------------------------------
+    accounting_fast_model_chain: str = Field(
+        default="qwen3-30b-a3b-instruct-2507,qwen-flash,qwen-max",
+        description=(
+            "Comma-separated model chain for MECHANICAL LLM work that needs "
+            "no accounting judgement: semantic fact extraction, perception, "
+            "classification and formatting. MEASURED: qwen3-30b-a3b-instruct-"
+            "2507 answered the full 10.9 KB accounting prompt with the correct "
+            "disposal decision in 9.8s and produced correct tool calls in "
+            "3.5s; qwen-flash is the 6.2s / 9.2s equivalent. The chain ends "
+            "with qwen-max so a fast-tier quota problem degrades to a known-"
+            "good model instead of failing. Set it to 'standard' to run these "
+            "stages on the standard qwen_model_chain again (an EMPTY value "
+            "cannot be used as the kill switch: the deploy validator treats a "
+            "present-but-empty env var as unset)."
         ),
     )
 
@@ -350,6 +408,29 @@ class Settings(BaseSettings):
             if m and m not in banned and m not in seen:
                 seen.append(m)
         return seen or [self.qwen_model]
+
+    @property
+    def accounting_fast_chain_list(self) -> List[str]:
+        """Ordered chain for MECHANICAL LLM work (see the tier block above).
+
+        Falls back to the standard chain when the configured value names no
+        usable model (empty after safety filtering, e.g. only banned entries),
+        so a misconfigured tier can never leave a mechanical stage without a
+        model.
+        """
+        banned = {m.strip() for m in self.qwen_banned_models.split(",") if m.strip()}
+        seen: List[str] = []
+        for m in (self.accounting_fast_model_chain or "").split(","):
+            m = m.strip()
+            # "standard" is the documented KILL SWITCH: an empty string cannot
+            # serve as one, because the deploy validator treats a present-but-
+            # empty environment variable as unset (serverless platforms
+            # materialize optional variables as empty strings), so
+            # ACCOUNTING_FAST_MODEL_CHAIN="" would just restore the default.
+            if not m or m.lower() == "standard" or m in banned or m in seen:
+                continue
+            seen.append(m)
+        return seen or self.qwen_chain_list
 
     @property
     def qwen_vision_chain_list(self) -> List[str]:

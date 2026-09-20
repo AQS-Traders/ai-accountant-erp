@@ -336,7 +336,16 @@ async def _understand(
     if not msg:
         return None
 
-    generate = getattr(orchestrator, "generate_text", None) if orchestrator else None
+    # Mechanical extraction is the FAST TIER's job: it reads text into facts and
+    # makes no accounting decision. ``generate_text_light`` uses the measured
+    # fast model chain (see settings.accounting_fast_model_chain); test doubles
+    # and older orchestrators without it fall back to the standard entry point,
+    # so the stage keeps working with any implementation.
+    generate = None
+    if orchestrator is not None:
+        generate = getattr(orchestrator, "generate_text_light", None)
+        if not callable(generate):
+            generate = getattr(orchestrator, "generate_text", None)
     if not callable(generate):
         return None
 

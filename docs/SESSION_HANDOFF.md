@@ -168,6 +168,52 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
      one disposal-type and one settlement-type request before declaring it
      live.
 
+   * **MODEL TIER ROUTING (measured, implemented, shipped this session).** The
+     workspace endpoint is an AGGREGATED catalog (169 models: Qwen + DeepSeek +
+     Kimi + GLM), so every stage was probed with ITS OWN real prompt and each
+     stage now gets its own chain instead of all stages sharing one:
+     - DEEP `accounting_reasoning_model_chain = qwen3-max,qwen-max` (the
+       accounting-reasoning rounds): correct disposal decision on the real
+       ~10.9 KB prompt in **~10.7 s**.
+     - STANDARD `qwen_model_chain = qwen-max,qwen3-max,qwen3.6-plus` (tool
+       planning): `qwen-max` = **3.75 s** with correct tool calls vs **8.12 s**
+       for the previous head `qwen3.6-plus` (a THINKING model — it stays as the
+       last Qwen resort before Gemini).
+     - FAST `accounting_fast_model_chain =
+       qwen3-30b-a3b-instruct-2507,qwen-flash,qwen-max` (MECHANICAL stages
+       only: semantic fact extraction, entity perception): the same 10.9 KB
+       text in **9.8 s** vs **57.8 s** on `qwen3.6-plus`; the 2-tool request
+       3.47 s vs 8.12 s.
+     - `AIOrchestrator.generate_text_light` is the ONLY fast-tier entry point;
+       `semantic_layer._understand` calls it (with a `getattr` fallback so
+       orchestrators without it keep working). The reasoning rounds call
+       `generate_text` with the DEEP chain, so a cheap mechanical model can
+       never decide accounting.
+     - **DEFECT FIXED (the tiering was inert):** `generate_text(model_chain=…)`
+       filtered the standard chain by the requested chain, so a tier model that
+       is not in the standard chain collapsed to the standard chain and the
+       tier had no effect. The requested chain now IS the candidate list (the
+       guard for `_candidate_providers` test doubles is kept via
+       `inspect.signature`); Gemini still tails it.
+     - `qwen_client` now DISCOVERS per-model parameter quirks from a 400
+       (`kimi-k3` rejects `temperature`; small Qwen3 models demand
+       `enable_thinking=false`) and retries ONCE without the parameter, so a
+       reachable catalog model is not unusable. The recursion is bounded by the
+       quirk set and everything else still raises `ProviderError`.
+     - Kill switch: `ACCOUNTING_FAST_MODEL_CHAIN=standard`. A BLANK value is
+       NOT a kill switch: `Settings._empty_env_means_unset` REMOVES blank values
+       (the serverless deploy fix), so the field DEFAULT applies and the tier
+       stays ON — pinned by a test.
+     - Docs: `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md` §10/§10.1 (tier table
+       + invariants) and §11 (the tier test file).
+     - Tests: `app/tests/test_model_tiers.py` (**17 tests, no network**) +
+       updated `app/tests/test_provider_*`. **Full backend suite: 934 passed, 0
+       failures** (12.4 s). The shipped defaults are asserted from
+       `Settings.model_fields`, so a local `.env` can never mask a regression.
+     - NOTE: `.env` is git-ignored (`.gitignore:6`) and the Vercel project has
+       NO `QWEN_MODEL_CHAIN` / `ACCOUNTING_*` variables, so these defaults are
+       what the deployment actually runs — no dashboard change was needed.
+
 ## Remaining work (in priority order)
 
 > **STATUS UPDATE (deployment completed this session — keep for history):**

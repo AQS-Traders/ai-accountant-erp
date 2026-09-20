@@ -36,6 +36,7 @@ agent itself is provider-agnostic.
 
 from __future__ import annotations
 
+import inspect
 import time
 from typing import Any, Dict, List, Optional
 
@@ -102,14 +103,24 @@ class AIOrchestrator:
     # -------------------------------------------------------------------
 
     def _candidate_providers(
-        self, *, requires_vision: bool = False
+        self,
+        *,
+        requires_vision: bool = False,
+        text_chain: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Ordered candidate list for the request's capability needs.
 
         Each candidate: {"provider", "model", "factory", "capability"}.
-        Text requests traverse the Qwen text chain then Gemini; vision
-        requests traverse ONLY vision-capable models (an image must
-        never be sent to a text-only model — capability, not fallback).
+        Text requests traverse the requested Qwen text chain (the standard
+        chain when none is given) then Gemini; vision requests traverse ONLY
+        vision-capable models (an image must never be sent to a text-only
+        model — capability, not fallback).
+
+        ``text_chain`` is how the MODEL TIERS reach the transport: the
+        accounting-reasoning stage names the deep chain, the mechanical
+        extraction stages name the fast chain. An unknown model name simply
+        produces no candidate for it — the rest of the requested chain, then
+        Gemini, still run.
         """
         settings = get_settings()
         candidates: List[Dict[str, Any]] = []
@@ -128,7 +139,8 @@ class AIOrchestrator:
             # does not accept image parts. Document requests must be handled
             # by the verified vision-capable Qwen chain.
         else:
-            for model in settings.qwen_chain_list:
+            chain = [m for m in (text_chain or []) if m] or settings.qwen_chain_list
+            for model in chain:
                 candidates.append(
                     {
                         "provider": "qwen",
@@ -282,15 +294,27 @@ class AIOrchestrator:
         """Plain text generation across the same capability chain.
 
         ``model_chain`` restricts/orders the Qwen candidates for THIS call — the
-        accounting-reasoning stage uses it to name a faster model than the
-        standard chain when the reasoning round is the slow part of a request.
+        accounting-reasoning stage names the deep model chain and the mechanical
+        extraction stages name the fast one. The chain IS the candidate list, so
+        a tier that names a model outside the standard chain is honoured instead
+        of silently reverting to the standard chain. A model the provider does
+        not serve fails its own candidate only: the rest of the requested chain,
+        then Gemini, still run (Gemini is the transport's last resort for text).
         """
-        candidates = self._candidate_providers(requires_vision=False)
-        if model_chain:
-            allowed = [m for m in model_chain if m]
-            candidates = [c for c in candidates if c["model"] in allowed] or candidates
-            rank = {name: idx for idx, name in enumerate(allowed)}
-            candidates.sort(key=lambda c: rank.get(c["model"], len(rank)))
+        accepts_chain = False
+        try:
+            params = inspect.signature(self._candidate_providers).parameters
+            accepts_chain = "text_chain" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except (TypeError, ValueError):  # pragma: no cover - exotic callables
+            accepts_chain = False
+        if model_chain and accepts_chain:
+            candidates = self._candidate_providers(
+                requires_vision=False, text_chain=model_chain
+            )
+        else:
+            candidates = self._candidate_providers(requires_vision=False)
         for candidate in candidates:
             name = candidate["provider"]
             model = candidate["model"]
@@ -309,6 +333,32 @@ class AIOrchestrator:
                 else:
                     self._gemini = None
         return ""
+
+    async def generate_text_light(
+        self,
+        *,
+        prompt: str,
+        context: Optional[AgentContext] = None,
+    ) -> str:
+        """Text generation on the FAST tier — MECHANICAL work only.
+
+        This is the entry point for stages that EXTRACT or NORMALISE rather
+        than decide accounting: semantic fact extraction, entity perception,
+        classification, formatting. It must never be used for the accounting
+        reasoning rounds, whose model chain is chosen for judgement quality
+        (``settings.accounting_reasoning_model_chain``).
+
+        Tiering is measurement-driven, not cosmetic. On the live workspace:
+        the same 10.9 KB accounting text took 9.8s on qwen3-30b-a3b-instruct
+        and 57.8s on qwen3.6-plus, and the same 2-tool request took 3.5s vs
+        8.1s — the difference is reasoning tokens the mechanical stages never
+        use. ``ACCOUNTING_FAST_MODEL_CHAIN=standard`` disables the tier (the
+        standard chain is used), so behaviour can be reverted by config alone.
+        """
+        chain = get_settings().accounting_fast_chain_list
+        return await self.generate_text(
+            prompt=prompt, context=context, model_chain=chain
+        )
 
     # -------------------------------------------------------------------
     # Health / status
