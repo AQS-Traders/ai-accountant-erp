@@ -11,8 +11,11 @@ You are the senior engineer stabilising and safely deploying
 `zameerchattha0-ops/ai-accountant-erp` (AI-powered ERP: FastAPI backend,
 Next.js frontend, Supabase/PostgreSQL, AI orchestration, Vercel deployment).
 
-**Working branch: `agent/fix-ledger-confirmation-flow`** (already pushed, PR
-open). Never work on `main` directly. Never force-push.
+**Working branch: `agent/fix-ledger-confirmation-flow` is MERGED and shipped** —
+PR #6 → `main` = `03e29fc`, built to production (`dpl_HKCYMMvbH97vnud21k7FezRgYgiQ`)
+and served by the official link **`https://ai-accountant-erp.vercel.app`**.
+Start every new piece of work from a **fresh branch off `main`**; never work on
+`main` directly. Never force-push.
 
 **Security rules (non-negotiable):**
 
@@ -49,8 +52,9 @@ written with the editor tool and run via
 
 ## Completed work (achieved - verified this session)
 
-All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
-`5f63bb5` at handoff.
+All commits are on `main` (`HEAD` = `03e29fc`, PR #6 merge) and deployed to
+production. The previous long-lived work branch
+`agent/fix-ledger-confirmation-flow` is fully contained in `main`.
 
 1. **Ledger confirmation flow fixed (commit `6008db6`, migration 079).**
    The root cause of the repeated question: the backend returned
@@ -213,13 +217,30 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
      - NOTE: `.env` is git-ignored (`.gitignore:6`) and the Vercel project has
        NO `QWEN_MODEL_CHAIN` / `ACCOUNTING_*` variables, so these defaults are
        what the deployment actually runs — no dashboard change was needed.
-     - SHIPPED AND VERIFIED: commit `6dd25f6` on
+     - SHIPPED AND VERIFIED on the preview: commit `6dd25f6` on
        `agent/fix-ledger-confirmation-flow` (7 files, +654/-46); GitHub CI run
        **35502361249 = success**; the Vercel preview for that sha is **READY**
        at `https://ai-accountant-omm1hbn4a-zameerchattha0-ops.vercel.app` with
-       `/`, `/api/health` and `/docs` all **200**; production (`main` =
-       `35c3910`) untouched; working tree clean and the branch is in sync with
-       origin (0 ahead / 0 behind).
+       `/`, `/api/health` and `/docs` all **200**.
+     - **PRODUCTION (the official link) NOW RUNS IT.** PR **#6** (base `main`,
+       head `agent/fix-ledger-confirmation-flow`, 21 files, +10658/-2315) was
+       merged after BOTH CI runs on the head sha finished green
+       (push `35502668739` + pull_request `35503080455`); merge commit
+       **`03e29fc4b39ec0c1cf564d256eb60da47ca7453b`**, so `main` = `03e29fc`.
+       Vercel built the production deployment **`dpl_HKCYMMvbH97vnud21k7FezRgYgiQ`**
+       (sha `03e29fc`, target `production`, branch `main`) → **READY**, and
+       `GET /v4/aliases/ai-accountant-erp.vercel.app` resolves to exactly that
+       deployment, i.e. **`https://ai-accountant-erp.vercel.app` serves the new
+       code** (`/`, `/api/health` → `{"status":"ok","version":"1.0.0",
+       "config_ok":true}`, `/docs` all 200). The two previous production
+       deployments (`35c3910`, `77c4dd6`) now report **no aliases**, and there
+       were **no migrations** in the merged range — the deploy implied no
+       schema change. The branch is fully contained in `main` (0 commits
+       ahead); start the next piece of work from a NEW branch off `main`.
+     - STILL OPEN (unchanged): the authenticated end-to-end ledger smoke test on
+       production (one sale needing a dedicated revenue ledger, answer CREATE,
+       verify one ledger + one balanced journal by SQL) — it needs an
+       interactive authenticated session.
 
 ## Remaining work (in priority order)
 
