@@ -213,6 +213,13 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
      - NOTE: `.env` is git-ignored (`.gitignore:6`) and the Vercel project has
        NO `QWEN_MODEL_CHAIN` / `ACCOUNTING_*` variables, so these defaults are
        what the deployment actually runs — no dashboard change was needed.
+     - SHIPPED AND VERIFIED: commit `6dd25f6` on
+       `agent/fix-ledger-confirmation-flow` (7 files, +654/-46); GitHub CI run
+       **35502361249 = success**; the Vercel preview for that sha is **READY**
+       at `https://ai-accountant-omm1hbn4a-zameerchattha0-ops.vercel.app` with
+       `/`, `/api/health` and `/docs` all **200**; production (`main` =
+       `35c3910`) untouched; working tree clean and the branch is in sync with
+       origin (0 ahead / 0 behind).
 
 ## Remaining work (in priority order)
 
