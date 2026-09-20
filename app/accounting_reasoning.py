@@ -953,11 +953,19 @@ async def run_reasoning_loop(
         )
         return outcome
 
+    # Round budget exhausted without an accepted decision.  This is a
+    # TERMINAL outcome: there are no rounds left to satisfy a dangling
+    # NEEDS_EVIDENCE, and — production incident a59b889c-dc26-4ba6-a90a-
+    # e0cb6085dacf — falling off the end of the function implicitly returned
+    # None, which crashed the caller with AttributeError: 'NoneType' object
+    # has no attribute 'as_dict'.  Every reachable terminal path must return
+    # a populated ReasoningOutcome.
     outcome.evidence_results = list(gathered)
     outcome.rounds = rounds_used
     if violations:
         outcome.violations = list(violations)
-        outcome.status = UNSUPPORTED
+    outcome.status = UNSUPPORTED
+    return outcome
 
 
 # ---------------------------------------------------------------------------

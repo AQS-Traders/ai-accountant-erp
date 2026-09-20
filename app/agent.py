@@ -1929,6 +1929,34 @@ async def execute(
                     _log_step(session_id, event, payload)
                 ),
             )
+            # Defense in depth: run_reasoning_loop() contractually returns a
+            # populated ReasoningOutcome on every reachable terminal path.
+            # If an internal defect ever violates that contract, fail
+            # CONTROLLED here — never crash on ``as_dict()`` (the production
+            # incident a59b889c), never continue to planning, a confirmation
+            # snapshot or execution from a missing reasoning result, and
+            # never let the generic handler mask a programming error.
+            if _reasoning is None:
+                log.error(
+                    "agent.reasoning_result_missing",
+                    session_id=str(session_id),
+                )
+                await _update_status(session_id, ExecutionStatus.FAILED)
+                await _log_step(session_id, "FAILED", {
+                    "reason": "reasoning_result_missing",
+                    "stage": "reasoning",
+                    "controlled": True,
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.FAILED,
+                    execution_id=session_id,
+                    summary=(
+                        "The accounting reasoning stage failed unexpectedly. "
+                        "Nothing was recorded yet. Please send your request "
+                        "again — everything you have already told me is kept "
+                        "in this conversation."
+                    ),
+                )
             await _log_step(session_id, "ACCOUNTING_REASONING", _reasoning.as_dict())
             _phase_elapsed(
                 "accounting_reasoning.done",
@@ -3373,6 +3401,18 @@ async def execute(
                 verification_status="FAILED",
                 status="FAILED",
             )
+            # Durable timeline: an unhandled exception must be visible in the
+            # execution timeline as FAILED, not leave it silently ending at
+            # the previous successful step.  "FAILED" is in
+            # _DURABLE_STEP_TYPES, so this write is awaited inline — it
+            # cannot be lost to a queue flush or a torn-down serverless
+            # invocation.  The result row above is written as before.
+            await _log_step(session_id, "FAILED", {
+                "stage": "agent_execute",
+                "reason": str(exc)[:300],
+                "error_type": type(exc).__name__,
+                "controlled": False,
+            })
         return AgentResponse(
             status=ExecutionStatus.FAILED,
             execution_id=session_id,
