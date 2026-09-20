@@ -157,6 +157,17 @@ _TRANSACTION_INTENTS = {
     "register_fixed_asset",
 }
 
+# Work Stream S2 — planner intents the SEMANTIC layer may set. This is the
+# deterministic whitelist: a semantic intent outside it is ignored and the
+# keyword extractor decides (the LLM cannot invent an intent).
+_SEMANTIC_INTENTS = frozenset({
+    "record_credit_sale", "record_cash_sale", "record_sale",
+    "record_credit_purchase", "record_cash_purchase", "record_purchase",
+    "record_expense", "record_receipt", "record_payment",
+    "create_invoice", "create_purchase_bill", "create_credit_note",
+    "create_purchase_return",
+})
+
 # Work Stream A - MANDATORY TRANSACTION-DATE PROTOCOL: every mutation
 # intent must resolve an explicit accounting date before any tool call.
 # Canonical set lives in app.reasoning (DATE_REQUIRED_INTENTS) so the
@@ -534,8 +545,16 @@ def plan(
             segments, clarification_history, user_message, org_preferences
         )
 
-    # 1. Identify intent (refined by payment-method context)
-    intent = _identify_intent(msg_lower)
+    # 1. Identify intent — SEMANTIC FIRST (Work Stream S2).
+    #    The LLM semantic layer expresses the business act in ERP vocabulary
+    #    ("supplied X with chairs, payment later" -> record_credit_sale).
+    #    A whitelist makes any unknown/out-of-vocabulary value fall back to
+    #    the keyword extractor, which stays the FALLBACK — never the brain.
+    _semantic_intent = (prefill_entities or {}).get("semantic_intent")
+    if _semantic_intent in _SEMANTIC_INTENTS:
+        intent = _semantic_intent
+    else:
+        intent = _identify_intent(msg_lower)
     payment_method = _extract_payment_method(msg_lower)
     intent = _refine_intent(intent, payment_method)
 
@@ -690,6 +709,46 @@ def plan(
         # fields, confirmation) reflect the now-known treatment.
         if intent in ("record_purchase", "record_sale") and entities.get("payment_method"):
             intent = _refine_intent(intent, entities.get("payment_method"))
+
+    # 2b. GROUNDED LLM PREFILL (Work Stream S2 — AI-first perception).
+    #     Facts segregated from the user's OWN sentence by app/semantic_layer.py
+    #     + app/entity_segregation.py (verbatim-grounded in Python) fill the
+    #     gaps BEFORE any questionnaire is computed, so fields the user
+    #     already stated flow to the next stages instead of being re-asked.
+    #     APPLICATION POINT: AFTER the clarification-answer merge and BEFORE
+    #     org preferences.  Precedence (later stages overwrite): regex capture
+    #     <= LLM prefill < clarification answer < org preference — an
+    #     ANSWERED value is therefore never clobbered by a grounded LLM guess.
+    #     Regex keeps winning on conflicts via setdefault; every prefill value
+    #     was already verified to exist in the message before it got here.
+    for _pk, _pv in (prefill_entities or {}).items():
+        if _pv is None or _pv == "" or _pk == "semantic_intent":
+            continue
+        if _pk in ("supplier_name", "customer_name"):
+            # Work Stream R4.4 stays true whichever stage produced the name:
+            # table furniture ("payment") and amount shapes ("Rs.12") must
+            # never reach the party gate.
+            _prefill_name = str(_pv).strip()
+            if (
+                not _prefill_name
+                or _prefill_name.lower() in _PARTY_NOISE
+                or re.fullmatch(
+                    r"(rs\.?|pkr)?\s*[\d,]+(?:\.\d+)?",
+                    _prefill_name,
+                    re.IGNORECASE,
+                )
+            ):
+                continue
+        if _pk == "item_quantity":
+            # Mirror the regex path, which fills the generic quantity alias
+            # alongside the item-scoped one.
+            if not entities.get("item_quantity"):
+                entities["item_quantity"] = _pv
+                if not entities.get("quantity"):
+                    entities["quantity"] = _pv
+            continue
+        if not entities.get(_pk):
+            entities[_pk] = _pv
 
     # 3a. ORG PREFERENCES (Work Stream F) - learned defaults are treated as
     #     answered-for entities; an explicit user value ALWAYS wins (the
@@ -907,27 +966,12 @@ def plan(
     tools = _tools_for_intent(intent)
     context = _context_for_intent(intent)
 
-    # 5a. GROUNDED PREFILL (Work Stream S1) — values segregated by the LLM
-    #     entity stage fill GAPS only: regex captures, clarification answers
-    #     and org preferences (already merged above) always win.
-    for _pk, _pv in (prefill_entities or {}).items():
-        if _pv is None or _pv == "":
-            continue
-        if _pk == "item_quantity":
-            # Mirror the regex path, which fills the generic quantity alias
-            # alongside the item-scoped one.
-            if not entities.get("item_quantity"):
-                entities["item_quantity"] = _pv
-                if not entities.get("quantity"):
-                    entities["quantity"] = _pv
-            continue
-        if not entities.get(_pk):
-            entities[_pk] = _pv
-
     # 6. Clarification — DYNAMIC, MINIMAL and CONSOLIDATED:
     #    only genuinely-missing material info, gathered into ONE
     #    questionnaire (every independent gap in a single round — no
-    #    drip-feeding one question per turn).
+    #    drip-feeding one question per turn).  The grounded LLM prefill
+    #    (step 2b) has already filled everything the user actually stated,
+    #    so the questionnaire below contains ONLY genuine gaps.
     missing_fields = _missing_fields(intent, entities)
     clarification_qs = _questions_for_fields(intent, missing_fields, entities)
     clarification_needed = bool(clarification_qs)

@@ -81,6 +81,145 @@ All commits are on `agent/fix-ledger-confirmation-flow` and pushed. HEAD was
 8. **Pre-existing invariants verified in the LIVE database**: no session with
    multiple pending clarifications (0), no duplicate active revenue accounts
    (0), no unbalanced posted journal entries (0).
+9. **Work Stream S3 — LLM-primary accounting reasoning (IMPLEMENTED, verified
+   this session).** The architectural correction: the LLM is now the primary
+   accounting reasoning layer and Python is only the enforcement/execution
+   layer. See `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md` for the full
+   contract. Summary:
+   * NEW `app/books_evidence.py` — a CLOSED, organization-scoped,
+     permission-checked read surface of **15 evidence kinds** covering every
+     accounting area (chart of accounts, subledgers, open receivables/
+     payables, documents, journals, fixed assets, catalog, bank accounts,
+     periods, policies, prior transactions, reports). Unknown kinds,
+     undeclared arguments, tenant selectors and wrong argument types are
+     refused and fed back; permission denial is returned as evidence;
+     loader failure is data; results are bounded.
+   * NEW `app/accounting_reasoning.py` — the bounded reasoning loop
+     (`accounting_reasoning_max_rounds`, default 3) with exactly one decision
+     per round: `NEEDS_EVIDENCE` → evidence returned → reassess →
+     `NEEDS_INPUT` / `PROPOSAL` / `REFUSAL` / `COMPLETE` / `UNSUPPORTED`.
+     Deterministic validation refuses an incomplete or disallowed decision and
+     feeds the reason BACK to the model (never repaired into a hardcoded
+     route). Also `preliminary_extraction()` — literals only, labelled
+     `PRELIMINARY EXTRACTION — may be corrected after accounting review`.
+   * `app/agent.py` — the loop runs BEFORE planning with the trusted tool
+     registry as the offered set; `REFUSAL → REJECTED`,
+     `COMPLETE → COMPLETED`, `NEEDS_INPUT → AWAITING_CLARIFICATION` (the
+     model's own question), an accepted `PROPOSAL` becomes the execution plan
+     (snapshot at the confirmation gate, executed only after approval through
+     the full security/validation stack). The user sees the MODEL's
+     accounting disclosure at confirmation (interpretation, affected records,
+     impact, what will NOT change, uncertainty, exact confirmation sentence).
+     The step log carries the whole reasoning trail.
+   * `app/prompts.py` — system instructions declare the LLM the primary
+     reasoning layer; context blocks are labelled `PRELIMINARY EXTRACTION`,
+     `LIVE BOOKS EVIDENCE`, `LLM ACCOUNTING REASONING`.
+   * `app/planner.py` — reduced to literal/candidate extraction: it reports
+     candidates and hints ONLY (no treatment, no account, no party
+     requirement, no workflow). 2193 added / 2149 removed lines.
+   * `app/reasoning.py`, `app/context_manager.py` — deliberately UNCHANGED:
+     they are the documented DEGRADATION path, used only when the provider is
+     unavailable, the answer is unparseable, or the request is a batch.
+     They no longer decide anything on the primary path.
+   * Tests: `app/tests/test_llm_primary_reasoning.py` (33 tests) pins the
+     contract, including: the same phrase yields a settlement with an open
+     bill and a question without one; an absent fixed asset yields a question,
+     never a disposal; an invented tool name never reaches a confirmation;
+     provider failure records nothing. **Full backend suite: 911 passed, 0
+     failures.**
+   * Fixed in this session: the constitution-cache regression
+     (`prompts.CONSTITUTION_PATH` now honours an explicit override while still
+     resolving the documented `docs/` location); the disclosure rule now
+     enforces PRESENCE (an explicit `unresolved_uncertainty: []` is a claim, an
+     omitted field is refused) instead of demanding non-empty lists; the
+     reasoning prompt now receives the trusted tool vocabulary (its
+     "only offered tools" enforcement was previously inert); a provider
+     EXCEPTION now degrades like a stall (honest `FAILED`, nothing recorded)
+     instead of surfacing a generic error; `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md`
+     created (it was referenced by three modules but did not exist); a dead
+     `return outcome` line removed; the stale `app/planner.py.bak_prefill`
+     deleted.
+   * LATENCY DEFECT FOUND AND FIXED IN THE PREVIEW (measured). The per-round
+     reasoning budget was **12s**, but the ~11 KB reasoning prompt needs longer:
+     the live step log showed round 1 hitting the cap at **12.09s on every
+     request** (`provider_failed: true, rounds: 1`), so the reasoning layer
+     silently degraded and the legacy keyword route answered — for
+     "record sale of fixed asset car on cash for 570000" it proposed
+     `register_fixed_asset` (an ACQUISITION) after ~35-40s. Fixes:
+     - `accounting_reasoning_timeout` 12s → **30s**, plus a NEW
+       `accounting_reasoning_total_timeout` (45s) bounding all rounds.
+     - NEW `accounting_reasoning_model_chain`, default **`qwen-max`**: measured
+       against the live provider, `qwen-max` answered the reasoning prompt in
+       **12.2s** with the correct decision (`event_type=disposal` + a
+       `fixed_assets` evidence request), while the standard chain's first model
+       (`qwen3.6-plus`, a thinking model) took **>35s**. Passed only to
+       providers that declare the parameter, so nothing else breaks.
+     - `provider_attempted` on the reasoning outcome: after a REAL provider
+       failure the agent no longer fires the same chain twice more (perception,
+       then planning) in one request — it stops honestly (`FAILED`, nothing
+       recorded) unless the deterministic path can serve the request.
+     - Prompt trimmed to ~10.9 KB and guarded by a test so the budget can never
+       be silently outgrown again.
+     - `app/tests/test_ledger_confirmation_flow.py` made HERMETIC (it was
+       calling the live provider and reading the live DB); the suite is now 3x
+       faster (30s vs 108s). **Full backend suite: 917 passed, 0 failures.**
+   * STILL OPEN for this work stream: deploy the branch (the same procedure as
+     section C of "Remaining work" below) and run the production smoke test for
+     one disposal-type and one settlement-type request before declaring it
+     live.
+
+   * **MODEL TIER ROUTING (measured, implemented, shipped this session).** The
+     workspace endpoint is an AGGREGATED catalog (169 models: Qwen + DeepSeek +
+     Kimi + GLM), so every stage was probed with ITS OWN real prompt and each
+     stage now gets its own chain instead of all stages sharing one:
+     - DEEP `accounting_reasoning_model_chain = qwen3-max,qwen-max` (the
+       accounting-reasoning rounds): correct disposal decision on the real
+       ~10.9 KB prompt in **~10.7 s**.
+     - STANDARD `qwen_model_chain = qwen-max,qwen3-max,qwen3.6-plus` (tool
+       planning): `qwen-max` = **3.75 s** with correct tool calls vs **8.12 s**
+       for the previous head `qwen3.6-plus` (a THINKING model — it stays as the
+       last Qwen resort before Gemini).
+     - FAST `accounting_fast_model_chain =
+       qwen3-30b-a3b-instruct-2507,qwen-flash,qwen-max` (MECHANICAL stages
+       only: semantic fact extraction, entity perception): the same 10.9 KB
+       text in **9.8 s** vs **57.8 s** on `qwen3.6-plus`; the 2-tool request
+       3.47 s vs 8.12 s.
+     - `AIOrchestrator.generate_text_light` is the ONLY fast-tier entry point;
+       `semantic_layer._understand` calls it (with a `getattr` fallback so
+       orchestrators without it keep working). The reasoning rounds call
+       `generate_text` with the DEEP chain, so a cheap mechanical model can
+       never decide accounting.
+     - **DEFECT FIXED (the tiering was inert):** `generate_text(model_chain=…)`
+       filtered the standard chain by the requested chain, so a tier model that
+       is not in the standard chain collapsed to the standard chain and the
+       tier had no effect. The requested chain now IS the candidate list (the
+       guard for `_candidate_providers` test doubles is kept via
+       `inspect.signature`); Gemini still tails it.
+     - `qwen_client` now DISCOVERS per-model parameter quirks from a 400
+       (`kimi-k3` rejects `temperature`; small Qwen3 models demand
+       `enable_thinking=false`) and retries ONCE without the parameter, so a
+       reachable catalog model is not unusable. The recursion is bounded by the
+       quirk set and everything else still raises `ProviderError`.
+     - Kill switch: `ACCOUNTING_FAST_MODEL_CHAIN=standard`. A BLANK value is
+       NOT a kill switch: `Settings._empty_env_means_unset` REMOVES blank values
+       (the serverless deploy fix), so the field DEFAULT applies and the tier
+       stays ON — pinned by a test.
+     - Docs: `docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md` §10/§10.1 (tier table
+       + invariants) and §11 (the tier test file).
+     - Tests: `app/tests/test_model_tiers.py` (**17 tests, no network**) +
+       updated `app/tests/test_provider_*`. **Full backend suite: 934 passed, 0
+       failures** (12.4 s). The shipped defaults are asserted from
+       `Settings.model_fields`, so a local `.env` can never mask a regression.
+     - NOTE: `.env` is git-ignored (`.gitignore:6`) and the Vercel project has
+       NO `QWEN_MODEL_CHAIN` / `ACCOUNTING_*` variables, so these defaults are
+       what the deployment actually runs — no dashboard change was needed.
+     - SHIPPED AND VERIFIED: commit `6dd25f6` on
+       `agent/fix-ledger-confirmation-flow` (7 files, +654/-46); GitHub CI run
+       **35502361249 = success**; the Vercel preview for that sha is **READY**
+       at `https://ai-accountant-omm1hbn4a-zameerchattha0-ops.vercel.app` with
+       `/`, `/api/health` and `/docs` all **200**; production (`main` =
+       `35c3910`) untouched; working tree clean and the branch is in sync with
+       origin (0 ahead / 0 behind).
 
 ## Remaining work (in priority order)
 

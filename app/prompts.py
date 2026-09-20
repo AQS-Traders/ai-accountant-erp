@@ -19,10 +19,17 @@ from typing import List
 
 import structlog
 
-from app.config import CONSTITUTION_PATH
+from app.config import constitution_path
 from app.models.schemas import AgentContext
 
 log = structlog.get_logger(__name__)
+
+# The file the loader reads. Resolved ONCE from the configured locations
+# (repo root first, then ``docs/``) and then exposed as a module-level name so
+# a caller - a deployment pinning the file, or a test - can point the loader
+# at a specific file. ``load_constitution`` always reads this name, never a
+# freshly resolved path, so that override actually takes effect.
+CONSTITUTION_PATH = constitution_path()
 
 # ---------------------------------------------------------------------------
 # Constitution cache (Work Stream A4).
@@ -47,12 +54,13 @@ def _reset_constitution_cache() -> None:
 
 def load_constitution() -> str:
     """Load the ERP_AGENT_CONSTITUTION.md (mtime-checked memory cache)."""
-    if CONSTITUTION_PATH.exists():
-        mtime = CONSTITUTION_PATH.stat().st_mtime
+    path = Path(CONSTITUTION_PATH)
+    if path.exists():
+        mtime = path.stat().st_mtime
         with _constitution_lock:
             if _constitution_cache["mtime"] == mtime:
                 return _constitution_cache["text"]
-        text = CONSTITUTION_PATH.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
         with _constitution_lock:
             _constitution_cache["mtime"] = mtime
             _constitution_cache["text"] = text
@@ -61,11 +69,35 @@ def load_constitution() -> str:
     return ""
 
 
+def build_primary_reasoning_instructions() -> str:
+    """The system-level statement that the LLM is the reasoning layer.
+
+    Kept separate from :func:`build_system_instructions` so any provider (or a
+    future worker) can carry it, and so tests can pin its wording.  Python's
+    role in this system is enforcement and execution — never speculation.
+    """
+    return "\n".join(
+        [
+            "You are the primary accounting reasoning layer.",
+            "The preliminary planner may be incomplete or wrong.",
+            "Do not blindly follow its intent or proposed workflow.",
+            "Inspect the live books and accounting context.",
+            "If the records contradict the preliminary interpretation,",
+            "reclassify the event and choose the correct next step.",
+            "Do not invent missing facts.",
+            "Ask questions based on the actual records and actual uncertainty.",
+            "Python validates and executes; it does not decide the treatment.",
+        ]
+    )
+
+
 def build_system_instructions(constitution: str = "") -> str:
     """Build the permanent system instructions shared by all providers."""
     instructions: List[str] = [
         "You are an AI accounting assistant for a small-business ERP system.",
         "You help users record financial transactions, query reports, and manage their books.",
+        "",
+        build_primary_reasoning_instructions(),
         "",
         "CORE RULES:",
         "1. NEVER compute debit/credit arithmetic — the accounting engine handles that.",
@@ -274,6 +306,77 @@ def build_user_content(message: str, context: AgentContext) -> str:
             "event, by accounting, by a workflow, or by a database dependency? "
             "If it is only 'usually created', do NOT create it."
         )
+
+    # Work Stream S3 — LIVE BOOKS EVIDENCE retrieved by the LLM reasoning
+    # layer.  Labelled as evidence (not as truth): the model must reassess the
+    # request against it and may reclassify.
+    if getattr(context, "live_evidence", None):
+        parts.append("")
+        parts.append(
+            "LIVE BOOKS EVIDENCE — use this to reassess the request "
+            "(retrieved from this organization's own records; empty means the "
+            "record does not exist, not that a lookup failed):"
+        )
+        for item in context.live_evidence[:12]:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind", "evidence")
+            if item.get("error"):
+                parts.append(f"  - {kind}: REFUSED/FAILED — {item.get('error')}")
+                continue
+            if not item.get("records"):
+                parts.append(f"  - {kind}: EMPTY — no matching record exists")
+                continue
+            rendered = str(item.get("records"))[:1200]
+            parts.append(f"  - {kind} ({len(item.get('records') or [])} row(s)): {rendered}")
+
+    # Work Stream S3 — the model's own prior accounting reasoning for this
+    # request (interpretation + proposed treatment), so the planning stage
+    # reassesses instead of silently replacing it with a keyword route.
+    reasoning = getattr(context, "accounting_reasoning", None)
+    if reasoning:
+        parts.append("")
+        parts.append(
+            "LLM ACCOUNTING REASONING (your own prior reading of the live "
+            "records for this request — re-verify it against the books above; "
+            "correct it if the records say otherwise):"
+        )
+        understanding = reasoning.get("understanding") or {}
+        for key in ("economic_event", "what_user_wants", "event_type", "basis"):
+            if understanding.get(key):
+                parts.append(f"  - {key}: {understanding.get(key)}")
+        proposal = reasoning.get("proposal") or {}
+        if proposal:
+            if proposal.get("interpretation"):
+                parts.append(f"  - proposed interpretation: {proposal['interpretation']}")
+            if proposal.get("accounting_impact"):
+                parts.append(
+                    f"  - proposed impact: {str(proposal['accounting_impact'])[:800]}"
+                )
+            if proposal.get("not_affected"):
+                parts.append(
+                    "  - explicitly NOT affected: "
+                    + "; ".join(str(x) for x in proposal["not_affected"][:6])
+                )
+            if proposal.get("unresolved_uncertainty"):
+                parts.append(
+                    "  - unresolved uncertainty: "
+                    + "; ".join(str(x) for x in proposal["unresolved_uncertainty"][:6])
+                )
+        if reasoning.get("evidence_summary"):
+            parts.append(f"  - evidence inspected: {reasoning['evidence_summary']}")
+
+    # Work Stream S3 — the deterministic extraction, labelled as PRELIMINARY so
+    # it can never be mistaken for a decided accounting treatment.
+    preliminary = getattr(context, "preliminary_extraction", None)
+    if preliminary:
+        parts.append("")
+        parts.append(
+            "PRELIMINARY EXTRACTION — may be corrected after accounting review:"
+        )
+        for key in ("literals", "candidate_subject_areas", "provisional_intent_hint"):
+            if preliminary.get(key):
+                parts.append(f"  - {key}: {preliminary[key]}")
 
     # Extracted entities — authoritative values parsed from the user's
     # message. The model must reuse these instead of re-parsing (and must

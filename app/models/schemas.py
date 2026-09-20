@@ -335,6 +335,16 @@ class AgentContext(BaseModel):
     economic_event: Optional[str] = None
     impact_map: Dict[str, Any] = Field(default_factory=dict)
     prohibited_actions: List[Dict[str, str]] = Field(default_factory=list)
+    # Work Stream S3 — LLM-PRIMARY ACCOUNTING REASONING.
+    # ``preliminary_extraction`` is the deterministic LITERAL-only extraction,
+    # explicitly labelled as provisional in the prompt.  ``live_evidence``
+    # carries the LIVE BOOKS EVIDENCE blocks the reasoning layer retrieved
+    # (rendered under their own label).  ``accounting_reasoning`` carries the
+    # model's own interpretation/proposal so later stages reassess against it
+    # rather than overwriting it with a keyword route.
+    preliminary_extraction: Dict[str, Any] = Field(default_factory=dict)
+    live_evidence: List[Dict[str, Any]] = Field(default_factory=list)
+    accounting_reasoning: Optional[Dict[str, Any]] = None
 
 
 # ===================================================================

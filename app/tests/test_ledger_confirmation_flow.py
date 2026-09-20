@@ -678,6 +678,17 @@ class TestFullLedgerFlow:
                 for tc in tool_calls
             ]
 
+        # HERMETIC: this file verifies the LEGACY ledger flow, so the accounting
+        # reasoning stage gets a double instead of the live provider. Without it
+        # the test made a real LLM call and real evidence reads (live network).
+        class _LegacyProvider:
+            async def generate_text(self, *, prompt: str = "", **kw):
+                # Parses as a decision that helps nobody → the pipeline falls
+                # through to the deterministic path exactly as before.
+                return '{"understanding": {"basis": "legacy-flow test double"}}'
+
+        monkeypatch.setattr(agent_mod, "get_client", lambda: _LegacyProvider())
+
         monkeypatch.setattr(agent_mod, "create_execution_session", fake_create_session)
         monkeypatch.setattr(agent_mod, "_close_superseded_sessions", AsyncMock())
         monkeypatch.setattr(agent_mod, "seed_clarification_history", AsyncMock())
