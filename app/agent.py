@@ -20,7 +20,7 @@ import re
 import uuid
 from collections import deque
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import structlog
 import time
@@ -28,6 +28,7 @@ import time
 from app.auth import AuthContext
 from app.context_manager import build_context
 from app.books_evidence import render_evidence_compact
+from app.idempotency import FINANCIAL_MUTATION_TOOLS
 from app.database import (
     create_clarification,
     create_confirmation,
@@ -3264,16 +3265,122 @@ async def execute(
                             for tr in failed_results
                         ],
                     },
+                    summary=f"Error: {first_error}",
                     verification_status="FAILED",
                 )
+                await _log_step(session_id, "FAILED", {
+                    "stage": "execution",
+                    "reason": "no_tool_succeeded",
+                    "failed": [tr.tool_name for tr in failed_results],
+                    "controlled": True,
+                })
                 return AgentResponse(
                     status=ExecutionStatus.FAILED,
                     execution_id=session_id,
                     summary=f"Operation failed: {first_error}",
                 )
+            # Operation-level verification: a successful AUXILIARY step never
+            # proves the user's PRIMARY requested operation succeeded.  A
+            # failed financial mutation — and always a failed/missing primary
+            # mutation — makes the whole execution FAILED (fail-closed), even
+            # though successful auxiliary mutations are retained and reported.
+            required_failures = _financial_mutation_failures(tool_results)
+            if _primary_mutation_failed(
+                tool_results, intent=execution_plan.intent
+            ):
+                primary = [
+                    tr for tr in tool_results
+                    if tr.tool_name == execution_plan.intent
+                ]
+                if primary:
+                    required_failures.extend(
+                        tr for tr in primary
+                        if not tr.success
+                        and all(tr is not r for r in required_failures)
+                    )
+                else:
+                    required_failures.append(
+                        ToolResult(
+                            tool_name=execution_plan.intent,
+                            success=False,
+                            error="primary operation did not execute",
+                        )
+                    )
+            if required_failures:
+                failed_ops = [tr.tool_name for tr in required_failures]
+                failed_detail = "; ".join(
+                    f"{tr.tool_name}: {(tr.error or 'failed')[:160]}"
+                    for tr in required_failures
+                )
+                failure_summary = _execution_failure_summary(
+                    successful_results, required_failures,
+                    intent=execution_plan.intent,
+                )
+                # Same canonical contract builders PHASE 9 uses (entity_contract)
+                # so the failure result card carries the real affected entities
+                # of the mutations that DID happen.
+                affected = build_affected_entities(tool_results)
+                accounting_impact = await build_accounting_impact(
+                    tool_results,
+                    resolve_account_name=_make_account_label_resolver(
+                        organization_id
+                    ),
+                )
+                # Durable timeline: the execution must explicitly show
+                #   <auxiliary> -> SUCCESS, <primary> -> FAILED, overall FAILED
+                # instead of ending silently (or worse, at a success step).
+                await _update_status(session_id, ExecutionStatus.FAILED)
+                await _log_step(session_id, "FAILED", {
+                    "stage": "execution",
+                    "reason": "required_mutation_failed",
+                    "failed_operations": failed_ops,
+                    "succeeded_operations": [
+                        tr.tool_name for tr in successful_results
+                    ],
+                    "detail": failed_detail[:300],
+                    "controlled": True,
+                })
+                # The result row is mechanical truth — never the LLM
+                # narrative or the plan's expected_outcome.
+                await create_execution_result(
+                    session_id=session_id,
+                    result_data={
+                        "summary": failure_summary,
+                        "tool_count": len(tool_results),
+                        "succeeded_operations": [
+                            tr.tool_name for tr in successful_results
+                        ],
+                        "failed_operations": [
+                            {
+                                "tool": tr.tool_name,
+                                "error": (tr.error or "")[:300],
+                            }
+                            for tr in required_failures
+                        ],
+                        "affected_entities": affected,
+                        "accounting_impact": accounting_impact,
+                    },
+                    summary=failure_summary,
+                    action_type=execution_plan.intent,
+                    affected_entities=affected,
+                    verification_status="FAILED",
+                    status="FAILED",
+                )
+                return AgentResponse(
+                    status=ExecutionStatus.FAILED,
+                    execution_id=session_id,
+                    action=execution_plan.intent,
+                    summary=failure_summary,
+                    affected_entities=affected if affected else None,
+                    accounting_impact=(
+                        accounting_impact if accounting_impact else None
+                    ),
+                    verification_status="FAILED",
+                )
             if failed_results:
-                # Recovered partial failure — keep executing; the failed
-                # steps are reported transparently in the final summary.
+                # Recovered partial failure — only NON-required operations
+                # (read-only lookups, non-financial auxiliaries) can reach
+                # here.  Keep executing; report them transparently.
                 await _log_step(session_id, "VALIDATING", {
                     "recovered_failures": [
                         {"tool": tr.tool_name, "error": (tr.error or "")[:300]}
@@ -3286,7 +3393,12 @@ async def execute(
         # resulting DB state was verified (accounting engine).  A response
         # with no executed tools can never be VERIFIED.
         await _update_status(session_id, ExecutionStatus.VERIFYING)
-        verified = bool(successful_results)
+        verified = (
+            bool(successful_results)
+            and not _primary_mutation_failed(
+                tool_results, intent=execution_plan.intent
+            )
+        )
         for tr in tool_results:
             if tr.success and tr.data and isinstance(tr.data, dict):
                 entry = tr.data.get("entry")
@@ -3353,13 +3465,39 @@ async def execute(
         )
 
         result_summary = llm_text or execution_plan.expected_outcome or "Operation completed."
-        if failed_results:
-            # Transparently report recovered partial failures.
-            recovered = "; ".join(
-                f"{tr.tool_name}: {(tr.error or 'failed')[:120]}"
+        if not verified and _primary_mutation_failed(
+            tool_results, intent=execution_plan.intent
+        ):
+            # Belt-and-braces: the VALIDATION phase already returns on a failed
+            # primary mutation, so this is unreachable for a real plan
+            # (requires_validation is True for every mutation intent).  If it
+            # ever IS reached, the execution is NOT verified — so the persisted
+            # summary must be the mechanical failure truth, never the LLM
+            # narrative or the plan's expected_outcome.
+            result_summary = _execution_failure_summary(
+                successful_results,
+                [
+                    tr for tr in tool_results
+                    if not tr.success
+                    and (
+                        tr.tool_name in FINANCIAL_MUTATION_TOOLS
+                        or tr.tool_name == execution_plan.intent
+                    )
+                ],
+                intent=execution_plan.intent,
+            )
+        elif failed_results:
+            # Only NON-required failures reach here (read-only lookups,
+            # non-financial auxiliaries).  Report them accurately: nothing
+            # was retried, so never use retry wording.
+            remaining = "; ".join(
+                f"{tr.tool_name} failed: {(tr.error or 'failed')[:120]}"
                 for tr in failed_results
             )
-            result_summary = f"{result_summary}\n\nNote — some steps needed retries: {recovered}"
+            result_summary = (
+                f"{result_summary}\n\nNote — some operations failed "
+                f"(they were not retried): {remaining}"
+            )
 
         await create_execution_result(
             session_id=session_id,
@@ -3774,6 +3912,66 @@ async def _log_step(session_id: uuid.UUID, step_type: str, data: Dict[str, Any])
             log.warning("agent.step_log_failed", step=step_type, error=str(exc))
         return
     _spawn_step_write(coro)
+
+
+def _financial_mutation_failures(tool_results: Sequence[ToolResult]) -> List[ToolResult]:
+    """Failed FINANCIAL mutations (idempotency-guarded writes to the books).
+
+    A failed financial mutation can never be a "recovered" detail: the books
+    either carry the entry or they do not, so its failure is operation-level.
+    """
+    return [
+        tr for tr in tool_results
+        if not tr.success and tr.tool_name in FINANCIAL_MUTATION_TOOLS
+    ]
+
+
+def _primary_mutation_failed(tool_results: Sequence[ToolResult], *, intent: str) -> bool:
+    """True when the user's PRIMARY requested mutation did not succeed.
+
+    The execution intent names the primary operation (e.g. ``create_invoice``).
+    For a financial-intent execution the outcome is only honest when:
+
+    * the primary tool actually ran, AND
+    * it succeeded.
+
+    A successful AUXILIARY step (``create_customer``) proves nothing about the
+    primary operation and can never satisfy this check.
+    """
+    if not intent or intent not in FINANCIAL_MUTATION_TOOLS:
+        return False
+    primary_results = [tr for tr in tool_results if tr.tool_name == intent]
+    if not primary_results:
+        # The primary mutation never executed at all.
+        return True
+    return any(not tr.success for tr in primary_results)
+
+
+def _execution_failure_summary(
+    successful_results: Sequence[ToolResult],
+    failed_results: Sequence[ToolResult],
+    *,
+    intent: str,
+) -> str:
+    """Mechanical, evidence-derived failure summary.
+
+    Built ONLY from actual tool results — never from the LLM narrative or the
+    plan's ``expected_outcome``.  Principle: an LLM expected outcome is not a
+    verified database outcome; only the latter may produce a success claim,
+    and a failure claim must state exactly what succeeded and what did not.
+    """
+    succeeded = [tr.tool_name for tr in successful_results]
+    failed = [tr.tool_name for tr in failed_results]
+    parts = []
+    if intent in failed:
+        parts.append(f"{intent} failed — nothing was recorded for it")
+    else:
+        parts.append(f"{', '.join(failed)} failed")
+    if succeeded:
+        parts.append(
+            "completed before the failure: " + ", ".join(succeeded)
+        )
+    return "Operation FAILED. " + ". ".join(parts) + "."
 
 
 def _mutation_date(
