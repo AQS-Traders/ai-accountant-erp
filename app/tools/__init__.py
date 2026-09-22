@@ -781,11 +781,11 @@ register("create_invoice", handler=_create_invoice, read_only=False, contract=co
 register("get_invoice", handler=_get_invoice, read_only=True, description="Get invoice details")
 
 # Purchase
-register("create_purchase_bill", handler=_create_purchase_bill, read_only=False, contract=contract_from_callable(purchase_service.create_purchase_bill), description="Create a purchase bill")
+register("create_purchase_bill", handler=_create_purchase_bill, read_only=False, contract=contract_from_callable(purchase_service.create_purchase_bill, extra_arguments=("account_id",)), description="Create a purchase bill")
 register("get_purchase_bill", handler=_get_purchase_bill, read_only=True, description="Get purchase bill details")
 
 # Expense
-register("create_expense", handler=_create_expense, read_only=False, contract=contract_from_callable(expense_service.create_expense), description="Record an expense")
+register("create_expense", handler=_create_expense, read_only=False, contract=contract_from_callable(expense_service.create_expense, extra_arguments=("account_id",)), description="Record an expense")
 register("classify_expense", handler=_classify_expense, read_only=True, description="Classify expense category")
 
 # Payment
