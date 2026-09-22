@@ -589,6 +589,7 @@ def validate_outcome(
     *,
     offered_tools: Sequence[str] = (),
     forbidden_tools: Sequence[str] = (),
+    tool_contracts: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> List[str]:
     """Deterministic enforcement of a decision.  Returns violation messages.
 
@@ -631,6 +632,18 @@ def validate_outcome(
                     f"Tool '{call['tool_name']}' is prohibited for this economic "
                     "event by the organization's accounting policy."
                 )
+        # The proposed ARGUMENTS must bind against the Python contract of the
+        # tool that will receive them.  The model is offered tool NAMES only,
+        # so it composes argument keys from the vocabulary it can see (entity
+        # fields, org preferences): the production incident of 2026-09-20
+        # proposed create_invoice with 'line_items' / 'customer_name' /
+        # 'tax_category', the user approved that plan, and the call then died at
+        # CALL-BINDING time with no database work at all.  Python therefore
+        # rejects the un-bindable call HERE — before any confirmation snapshot
+        # exists — and feeds the precise message back to the model.
+        from app.tool_contract import validate_calls as _validate_calls
+
+        violations.extend(_validate_calls(tools, tool_contracts))
         stated = set(outcome.stated_disclosures)
         for field_name in REQUIRED_PROPOSAL_FIELDS:
             if field_name not in stated:
@@ -745,6 +758,7 @@ async def run_reasoning_loop(
     max_rounds: int = MAX_REASONING_ROUNDS,
     timeout_seconds: Optional[float] = None,
     step_logger: Any = None,
+    tool_contracts: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> ReasoningOutcome:
     """Run the LLM accounting reasoning loop against the live books.
 
@@ -922,7 +936,10 @@ async def run_reasoning_loop(
 
         # (b) Python enforces the decision before it is used.
         violations = validate_outcome(
-            outcome, offered_tools=offered_tools, forbidden_tools=forbidden_tools
+            outcome,
+            offered_tools=offered_tools,
+            forbidden_tools=forbidden_tools,
+            tool_contracts=tool_contracts,
         )
         if violations:
             _notify(

@@ -1327,7 +1327,14 @@ class TestAgentWiring:
                                 {
                                     "tool_name": "create_expense",
                                     "arguments": {
-                                        "amount": 5000,
+                                        # create_expense's real contract is
+                                        # `subtotal` (+ description) — NOT
+                                        # `amount`.  Python now rejects an
+                                        # un-bindable argument set BEFORE the
+                                        # confirmation snapshot exists; this
+                                        # fixture used to encode a plan that
+                                        # would have crashed at call binding.
+                                        "subtotal": 5000,
                                         "payee_name": "Internet Provider",
                                         "description": "internet",
                                     },
@@ -1364,7 +1371,7 @@ class TestAgentWiring:
         assert len(boundary["confirmations"]) == 1
         snapshot = boundary["confirmations"][0]["plan"]
         assert [entry["tool_name"] for entry in snapshot] == ["create_expense"]
-        assert snapshot[0]["arguments"]["amount"] == 5000
+        assert snapshot[0]["arguments"]["subtotal"] == 5000
 
     @pytest.mark.asyncio
     async def test_provider_failure_never_invents_a_decision(

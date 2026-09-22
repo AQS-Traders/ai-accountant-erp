@@ -37,6 +37,7 @@ from app.services import (
 from datetime import date
 
 from app.accounting_engine import auto_journal, record_cash_sale
+from app.tool_contract import contract_from_callable
 
 log = structlog.get_logger(__name__)
 
@@ -47,12 +48,27 @@ ToolHandler = Callable[..., Coroutine[Any, Any, ToolResult]]
 _TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {}
 
 
-def register(slug: str, *, handler: ToolHandler, read_only: bool = False, description: str = ""):
-    """Register a tool handler."""
+def register(
+    slug: str,
+    *,
+    handler: ToolHandler,
+    read_only: bool = False,
+    description: str = "",
+    contract: Optional[Dict[str, Any]] = None,
+):
+    """Register a tool handler.
+
+    ``contract`` is the tool's ARGUMENT contract, derived from the Python
+    callable that consumes the arguments (``contract_from_callable``).  It is
+    what lets Python reject an un-bindable call BEFORE the user is asked to
+    approve it — the missing check behind the 2026-09-20 create_invoice
+    incident.  A tool that declares no contract is simply not validated.
+    """
     _TOOL_REGISTRY[slug] = {
         "handler": handler,
         "read_only": read_only,
         "description": description,
+        "contract": contract,
     }
 
 
@@ -64,6 +80,20 @@ def get_handler(slug: str) -> Dict[str, Any] | None:
 def list_tools() -> list[str]:
     """Return all registered tool slugs."""
     return list(_TOOL_REGISTRY.keys())
+
+
+def tool_contracts() -> Dict[str, Dict[str, Any]]:
+    """Every DECLARED argument contract, keyed by tool slug.
+
+    Used by the reasoning layer to validate a proposed plan against the
+    callables that will execute it (see app/tool_contract.py).  Tools without a
+    declared contract are absent — never validated, never assumed strict.
+    """
+    return {
+        slug: entry["contract"]
+        for slug, entry in _TOOL_REGISTRY.items()
+        if entry.get("contract")
+    }
 
 
 # ===================================================================
@@ -732,13 +762,13 @@ async def _record_expense_payment(organization_id: uuid.UUID, **kw) -> ToolResul
 # Customer
 register("search_customer", handler=_search_customer, read_only=True, description="Search customers by name or code")
 register("get_customer", handler=_get_customer, read_only=True, description="Get customer details")
-register("create_customer", handler=_create_customer, read_only=False, description="Create a new customer")
+register("create_customer", handler=_create_customer, read_only=False, contract=contract_from_callable(customer_service.create), description="Create a new customer")
 register("get_customer_ledger", handler=_get_customer_ledger, read_only=True, description="Get customer ledger")
 
 # Supplier
 register("search_supplier", handler=_search_supplier, read_only=True, description="Search suppliers by name or code")
 register("get_supplier", handler=_get_supplier, read_only=True, description="Get supplier details")
-register("create_supplier", handler=_create_supplier, read_only=False, description="Create a new supplier")
+register("create_supplier", handler=_create_supplier, read_only=False, contract=contract_from_callable(supplier_service.create), description="Create a new supplier")
 register("get_supplier_ledger", handler=_get_supplier_ledger, read_only=True, description="Get supplier ledger")
 
 # Account
@@ -747,20 +777,20 @@ register("get_chart_of_accounts", handler=_get_chart_of_accounts, read_only=True
 register("create_account", handler=_create_account, read_only=False, description="Create a new account")
 
 # Invoice
-register("create_invoice", handler=_create_invoice, read_only=False, description="Create a sales invoice with line items: pass items=[{description, quantity, unit_price, ...}] — lines are validated and their totals computed by the service (never invent amounts)")
+register("create_invoice", handler=_create_invoice, read_only=False, contract=contract_from_callable(invoice_service.create_invoice), description="Create a sales invoice with line items: pass items=[{description, quantity, unit_price, ...}] — lines are validated and their totals computed by the service (never invent amounts)")
 register("get_invoice", handler=_get_invoice, read_only=True, description="Get invoice details")
 
 # Purchase
-register("create_purchase_bill", handler=_create_purchase_bill, read_only=False, description="Create a purchase bill")
+register("create_purchase_bill", handler=_create_purchase_bill, read_only=False, contract=contract_from_callable(purchase_service.create_purchase_bill), description="Create a purchase bill")
 register("get_purchase_bill", handler=_get_purchase_bill, read_only=True, description="Get purchase bill details")
 
 # Expense
-register("create_expense", handler=_create_expense, read_only=False, description="Record an expense")
+register("create_expense", handler=_create_expense, read_only=False, contract=contract_from_callable(expense_service.create_expense), description="Record an expense")
 register("classify_expense", handler=_classify_expense, read_only=True, description="Classify expense category")
 
 # Payment
-register("record_customer_receipt", handler=_record_customer_receipt, read_only=False, description="Record customer receipt with journal and allocation")
-register("record_supplier_payment", handler=_record_supplier_payment, read_only=False, description="Record supplier payment with journal and allocation")
+register("record_customer_receipt", handler=_record_customer_receipt, read_only=False, contract=contract_from_callable(payment_service.record_customer_receipt), description="Record customer receipt with journal and allocation")
+register("record_supplier_payment", handler=_record_supplier_payment, read_only=False, contract=contract_from_callable(payment_service.record_supplier_payment), description="Record supplier payment with journal and allocation")
 
 # Bank
 register("list_bank_accounts", handler=_list_bank_accounts, read_only=True, description="List bank accounts")
@@ -768,9 +798,9 @@ register("create_bank_account", handler=_create_bank_account, read_only=False, d
 register("record_bank_transfer", handler=_record_bank_transfer, read_only=False, description="Record bank-to-bank transfer with journal")
 
 # Journal
-register("prepare_journal", handler=_prepare_journal, read_only=False, description="Prepare a draft journal entry")
-register("validate_journal", handler=_validate_journal, read_only=False, description="Validate a journal entry")
-register("post_journal", handler=_post_journal, read_only=False, description="Post a validated journal entry")
+register("prepare_journal", handler=_prepare_journal, read_only=False, contract=contract_from_callable(accounting_service.prepare_journal), description="Prepare a draft journal entry")
+register("validate_journal", handler=_validate_journal, read_only=False, contract=contract_from_callable(accounting_service.validate_journal), description="Validate a journal entry")
+register("post_journal", handler=_post_journal, read_only=False, contract=contract_from_callable(accounting_service.post_journal), description="Post a validated journal entry")
 register("reverse_journal", handler=_reverse_journal, read_only=False, description="Reverse a posted journal entry")
 
 # Sales — trusted cash-sale domain operation (deterministic journal)
@@ -786,13 +816,13 @@ register("list_expenses", handler=_list_expenses, read_only=True, description="L
 register("generate_report", handler=_generate_report, read_only=True, description="Generate a custom report")
 
 # Project
-register("create_project", handler=_create_project, read_only=False, description="Create a project")
+register("create_project", handler=_create_project, read_only=False, contract=contract_from_callable(project_service.create), description="Create a project")
 register("get_project", handler=_get_project, read_only=True, description="Get project details")
 register("get_project_profitability", handler=_get_project_profitability, read_only=True, description="Get project profitability")
 
 # Quotation
 register("create_quotation", handler=_create_quotation, read_only=False, description="Create a sales quotation")
-register("convert_quotation", handler=_convert_quotation, read_only=False, description="Convert an accepted quotation into a sales invoice: creates the invoice linked to the source quotation, posts the receivable journal, and marks the quotation CONVERTED (double conversion is refused)")
+register("convert_quotation", handler=_convert_quotation, read_only=False, contract=contract_from_callable(quotation_service.convert_quotation), description="Convert an accepted quotation into a sales invoice: creates the invoice linked to the source quotation, posts the receivable journal, and marks the quotation CONVERTED (double conversion is refused)")
 
 # Credit Note
 register("create_credit_note", handler=_create_credit_note, read_only=False, description="Create a credit note")
@@ -849,16 +879,16 @@ async def _record_asset_depreciation(organization_id: uuid.UUID, **kw) -> ToolRe
 
 # Product catalog
 register("search_product", handler=_search_product, read_only=True, description="Search the product catalog by name (empty result = no product exists yet)")
-register("create_product", handler=_create_product, read_only=False, description="Create a catalog product (catalog only — the ERP has no stock-quantity ledger). Set is_stock_tracked=true ONLY when the user explicitly answered the inventory question confirming resale stock — never infer it")
+register("create_product", handler=_create_product, read_only=False, contract=contract_from_callable(product_service.create), description="Create a catalog product (catalog only — the ERP has no stock-quantity ledger). Set is_stock_tracked=true ONLY when the user explicitly answered the inventory question confirming resale stock — never infer it")
 
 # Service catalog
 register("search_service", handler=_search_service, read_only=True, description="Search the service catalog by name (empty result = no service exists yet)")
-register("create_service", handler=_create_service, read_only=False, description="Create a catalog service (billing unit HOUR/DAY/MONTH/FIXED/ITEM — services never involve stock or assets)")
+register("create_service", handler=_create_service, read_only=False, contract=contract_from_callable(service_service.create), description="Create a catalog service (billing unit HOUR/DAY/MONTH/FIXED/ITEM — services never involve stock or assets)")
 
 # Fixed asset lifecycle
 register("search_fixed_asset", handler=_search_fixed_asset, read_only=True, description="Search registered fixed assets by name or code (empty result = asset not registered)")
 register("get_fixed_asset", handler=_get_fixed_asset, read_only=True, description="Get fixed asset details by id")
-register("register_fixed_asset", handler=_register_fixed_asset, read_only=False, description="Acquire and capitalise a fixed asset: creates the asset record and posts the acquisition journal (Dr asset / Cr cash-bank or payable)")
+register("register_fixed_asset", handler=_register_fixed_asset, read_only=False, contract=contract_from_callable(fixed_asset_service.register_asset), description="Acquire and capitalise a fixed asset: creates the asset record and posts the acquisition journal (Dr asset / Cr cash-bank or payable)")
 register("dispose_fixed_asset", handler=_dispose_fixed_asset, read_only=False, description="Dispose of / sell / write off a fixed asset: removes cost and accumulated depreciation, records proceeds and any gain or loss via a posted journal")
 register("record_asset_depreciation", handler=_record_asset_depreciation, read_only=False, description="Record asset depreciation: posts the depreciation journal and updates accumulated depreciation and book value")
 
