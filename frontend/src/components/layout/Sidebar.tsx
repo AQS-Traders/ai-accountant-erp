@@ -8,7 +8,7 @@ import {
   LayoutDashboard, FileText, ShoppingCart, Users, Truck,
   FolderKanban, Receipt, CreditCard, Landmark, BookOpen,
   BarChart3, Settings, ChevronDown, ChevronRight, Menu, X,
-  Sparkles, PanelLeftClose, PanelLeft, Wallet,
+  Sparkles, PanelLeftClose, PanelLeft, Wallet, Package,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils/cn";
@@ -47,18 +47,25 @@ const navItems: NavItem[] = [
     tone: { icon: "text-rose-600", chip: "bg-rose-50" },
     children: [
       { label: "Chart of Accounts", href: "/accounting/chart-of-accounts" },
-      { label: "Journal", href: "/accounting/journal" },
+      // Renamed from "Journal": this page lists JOURNAL ENTRIES (each row is
+      // one double-entry document), so the label now says what it shows.
+      { label: "Journal Entries", href: "/accounting/journal" },
       { label: "General Ledger", href: "/accounting/general-ledger" },
       { label: "Trial Balance", href: "/accounting/trial-balance" },
     ],
   },
+  // The item master both Sales and Purchases consume, so it sits next to them.
+  { label: "Catalogue", href: "/catalogue", icon: Package,
+    tone: { icon: "text-teal-600", chip: "bg-teal-50" } },
   { label: "Customers", href: "/customers", icon: Users,
     tone: { icon: "text-info-600", chip: "bg-info-50" } },
   { label: "Suppliers", href: "/suppliers", icon: Truck,
     tone: { icon: "text-purple-600", chip: "bg-purple-50" } },
   { label: "Projects", href: "/projects", icon: FolderKanban,
     tone: { icon: "text-pink-600", chip: "bg-pink-50" } },
-  { label: "Expenses", href: "/expenses", icon: Receipt,
+  // Renamed from "Expenses": every row is an EXPENSE ENTRY (a recorded
+  // expense with its journal), matching "Journal Entries" above.
+  { label: "Expense Entries", href: "/expenses", icon: Receipt,
     tone: { icon: "text-orange-600", chip: "bg-orange-50" } },
   { label: "Payments", href: "/payments", icon: CreditCard,
     tone: { icon: "text-indigo-600", chip: "bg-indigo-50" } },

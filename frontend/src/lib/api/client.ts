@@ -121,6 +121,109 @@ export async function latestActiveSession(): Promise<ActiveSessionInfo> {
   return fetchApi("/api/ai/sessions/latest-active");
 }
 
+/* ---- Catalogue (products & services) -------------------------------------
+ *
+ * The page goes through the API rather than querying Supabase directly (the
+ * customers page does that) for three reasons spelled out in app/main.py:
+ * the item CODE is generated server-side by an RPC, the delete rule needs a
+ * cross-table usage check, and validation must live in one place so the page
+ * and the agent can never disagree.  Both kinds share the same four calls.
+ */
+export type CatalogueKind = "products" | "services";
+
+export interface CatalogueItem {
+  id: string;
+  name: string;
+  description: string | null;
+  is_active: boolean;
+  /** Products: "PRD-0001". Services: "SRV-0001". */
+  product_code?: string;
+  service_code?: string;
+  /** Products */
+  unit?: string | null;
+  is_stock_tracked?: boolean;
+  unit_price?: number | null;
+  cost_price?: number | null;
+  /** Services */
+  billing_unit?: string;
+  standard_rate?: number | null;
+  cost_rate?: number | null;
+  revenue_account_id?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface CatalogueCounts {
+  total: number;
+  active: number;
+  inactive: number;
+}
+
+export interface CatalogueList {
+  items: CatalogueItem[];
+  counts: CatalogueCounts;
+  status: string;
+}
+
+export interface CatalogueMutation {
+  item: CatalogueItem;
+  reused?: boolean;
+}
+
+export async function catalogueList(
+  kind: CatalogueKind,
+  params: { query?: string; status?: string } = {}
+): Promise<CatalogueList> {
+  const search = new URLSearchParams();
+  if (params.query) search.set("query", params.query);
+  if (params.status) search.set("status", params.status);
+  const qs = search.toString();
+  return fetchApi<CatalogueList>(`/api/catalogue/${kind}${qs ? `?${qs}` : ""}`);
+}
+
+export async function catalogueCreate(
+  kind: CatalogueKind,
+  payload: Record<string, unknown>
+): Promise<CatalogueMutation> {
+  return fetchApi<CatalogueMutation>(`/api/catalogue/${kind}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function catalogueUpdate(
+  kind: CatalogueKind,
+  id: string,
+  payload: Record<string, unknown>
+): Promise<CatalogueMutation> {
+  return fetchApi<CatalogueMutation>(`/api/catalogue/${kind}/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+/** Soft delete / reactivate — history keeps resolving the item. */
+export async function catalogueSetActive(
+  kind: CatalogueKind,
+  id: string,
+  active: boolean
+): Promise<CatalogueMutation> {
+  return fetchApi<CatalogueMutation>(`/api/catalogue/${kind}/${id}/status`, {
+    method: "POST",
+    body: JSON.stringify({ active }),
+  });
+}
+
+/** Hard delete — the API refuses (409) while any document references the item. */
+export async function catalogueDelete(
+  kind: CatalogueKind,
+  id: string
+): Promise<{ deleted: boolean }> {
+  return fetchApi<{ deleted: boolean }>(`/api/catalogue/${kind}/${id}`, {
+    method: "DELETE",
+  });
+}
+
 /* ---- Work Stream C: background runs ---- */
 
 export interface EnqueueJobResult {
