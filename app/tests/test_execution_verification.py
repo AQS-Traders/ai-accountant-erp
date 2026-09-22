@@ -175,6 +175,15 @@ def _stub_confirmed_world(
 
     async def fake_fetch_many(table, filters=None, **kw):
         if table == "ai_confirmations":
+            # The APPROVED plan carries CANONICAL ids: before execution the
+            # materialization stage resolves human-level references
+            # (`customer_name`, `items[].product_name`) against the live,
+            # tenant-scoped books (see app/plan_materialization.py), and these
+            # tests stub nothing about the party/catalog lookups.  Their subject
+            # is the VERIFICATION semantics — which outcome may be called
+            # VERIFIED — so the fixture supplies the materialized shape it would
+            # receive in production.  The name-based shape is covered by
+            # app/tests/test_plan_materialization.py.
             plan = [
                 {
                     "tool_name": "create_customer",
@@ -183,12 +192,12 @@ def _stub_confirmed_world(
                 {
                     "tool_name": "create_invoice",
                     "arguments": {
-                        "customer_name": "ABC Furnitures",
+                        "customer_id": "cust-abc-furnitures",
                         "invoice_date": "2026-09-20",
                         "due_date": "2026-10-20",
-                        "line_items": [
-                            {"quantity": 2, "unit_price": 16666.67,
-                             "product_name": "chairs"}
+                        "items": [
+                            {"description": "chairs", "quantity": 2,
+                             "unit_price": 16666.67}
                         ],
                     },
                 },
@@ -531,7 +540,10 @@ class TestExecuteOutcomeSemantics:
             invoice_success=True,
             extra_plan_calls=[{
                 "tool_name": "record_customer_receipt",
-                "arguments": {"amount": 25000},
+                # canonical reference: a receipt needs the customer's id, and
+                # the contract gate now refuses an un-bindable approved plan
+                # before anything executes.
+                "arguments": {"customer_id": "cust-abc-furnitures", "amount": 25000},
             }],
             extra_outcomes={
                 "record_customer_receipt": {
