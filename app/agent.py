@@ -1938,6 +1938,7 @@ async def execute(
             # is given exactly that vocabulary — Python decides which tools
             # exist, the model decides which one the event needs.
             from app.tools import list_tools as _list_registered_tools
+            from app.tools import tool_contracts as _tool_argument_contracts
 
             _reasoning = await _run_reasoning_loop(
                 _ReasoningFacts(
@@ -1952,6 +1953,12 @@ async def execute(
                 session_id=session_id,
                 orchestrator=get_client(),
                 offered_tools=list(_list_registered_tools()),
+                # The ARGUMENT contracts of the tools that will execute the
+                # plan.  The model is offered tool NAMES only, so Python must
+                # reject an un-bindable argument set BEFORE the user is asked to
+                # approve it (2026-09-20: an approved create_invoice plan died at
+                # call-binding time).  See app/tool_contract.py.
+                tool_contracts=_tool_argument_contracts(),
                 max_rounds=int(
                     getattr(_settings, "accounting_reasoning_max_rounds", 3)
                 ),
