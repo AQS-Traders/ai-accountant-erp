@@ -130,7 +130,8 @@ def _stub_context():
 
 
 def _stub_confirmed_world(
-    monkeypatch, *, outcomes, session=None, extra_plan_calls=None
+    monkeypatch, *, outcomes, session=None, extra_plan_calls=None,
+    primary_intent="create_invoice", plan_calls=None,
 ):
     """Stub ONLY process boundaries for a CONFIRMED multi-tool execution.
 
@@ -141,6 +142,11 @@ def _stub_confirmed_world(
     snapshot (the plan the user confirmed).  Tool calls and their results are
     paired positionally, so an extra operation must be added to the plan — not
     injected into the results — to stay faithful.
+
+    ``primary_intent`` / ``plan_calls`` let a caller exercise an operation whose
+    INTENT is not spelled like its TOOL (``record_expense`` -> ``create_expense``,
+    ``record_sale`` -> ``create_invoice``); the defaults reproduce the invoice
+    shape the other tests in this file use.
 
     The REAL agent code runs: resume_with_confirmation -> execute
     (confirmation_granted=True, approved_tool_calls) -> deterministic path
@@ -184,24 +190,28 @@ def _stub_confirmed_world(
             # VERIFIED — so the fixture supplies the materialized shape it would
             # receive in production.  The name-based shape is covered by
             # app/tests/test_plan_materialization.py.
-            plan = [
-                {
-                    "tool_name": "create_customer",
-                    "arguments": {"name": "ABC Furnitures"},
-                },
-                {
-                    "tool_name": "create_invoice",
-                    "arguments": {
-                        "customer_id": "cust-abc-furnitures",
-                        "invoice_date": "2026-09-20",
-                        "due_date": "2026-10-20",
-                        "items": [
-                            {"description": "chairs", "quantity": 2,
-                             "unit_price": 16666.67}
-                        ],
+            plan = (
+                [dict(call) for call in plan_calls]
+                if plan_calls is not None
+                else [
+                    {
+                        "tool_name": "create_customer",
+                        "arguments": {"name": "ABC Furnitures"},
                     },
-                },
-            ]
+                    {
+                        "tool_name": "create_invoice",
+                        "arguments": {
+                            "customer_id": "cust-abc-furnitures",
+                            "invoice_date": "2026-09-20",
+                            "due_date": "2026-10-20",
+                            "items": [
+                                {"description": "chairs", "quantity": 2,
+                                 "unit_price": 16666.67}
+                            ],
+                        },
+                    },
+                ]
+            )
             plan.extend(extra_plan_calls or [])
             return [{
                 "id": "conf-1",
@@ -360,11 +370,15 @@ def _stub_confirmed_world(
     # must key on.  MSG/EXPECTED mirror the production request.
     def fake_planner(*args, **kwargs):
         return agent_mod.ExecutionPlan(
-            intent="create_invoice",
+            intent=primary_intent,
             entity_type="customer",
             entity_name="ABC Furnitures",
             transaction_type="CREDIT_SALE",
-            potential_tools=["create_customer", "create_invoice"],
+            potential_tools=(
+                [call["tool_name"] for call in plan_calls]
+                if plan_calls is not None
+                else ["create_customer", "create_invoice"]
+            ),
             requires_validation=True,
             requires_accounting_engine=True,
             requires_confirmation=True,
@@ -688,4 +702,83 @@ class TestExecuteOutcomeSemantics:
         assert last["status"] == "FAILED"
         assert last["verification_status"] == "FAILED"
         assert "Invoice created successfully" not in last["summary"]
+
+
+
+class TestIntentToolVocabularyOutcome:
+    """An operation whose INTENT is not spelled like its TOOL.
+
+    ``record_expense`` is the intent; the tool that records it is
+    ``create_expense``.  PHASE 7 and PHASE 8 matched the intent STRING against
+    tool-result names, which matched nothing here — so a RECORDED expense (and
+    its posted journal) was closed FAILED with "primary operation did not
+    execute".  These tests drive the real Phase 7/8 code with the real intent.
+    """
+
+    @staticmethod
+    def _run(monkeypatch, *, expense_success: bool):
+        outcomes = {
+            "search_account": {"success": True, "data": {"results": []}},
+            "create_expense": (
+                {
+                    "success": True,
+                    "data": {"id": "exp-1", "entry": {"id": str(uuid.uuid4())}},
+                }
+                if expense_success
+                else {"success": False, "data": {}, "error": "account not found"}
+            ),
+        }
+        return _stub_confirmed_world(
+            monkeypatch,
+            outcomes=outcomes,
+            primary_intent="record_expense",
+            # The real plan searches the payable/expense account first — the
+            # AUXILIARY call is what makes the failure branch report the primary
+            # operation honestly instead of "nothing succeeded".
+            plan_calls=[
+                {"tool_name": "search_account", "arguments": {"query": "internet"}},
+                {
+                    "tool_name": "create_expense",
+                    "arguments": {"subtotal": 5000, "description": "internet"},
+                },
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_recorded_expense_is_completed_not_failed(self, monkeypatch):
+        rec = self._run(monkeypatch, expense_success=True)
+
+        response = await resume_with_confirmation(
+            session_id=uuid.UUID(rec["session"]["id"]),
+            approved=True, user_id=USER, organization_id=ORG,
+        )
+
+        assert response.status == ExecutionStatus.COMPLETED
+        assert response.verification_status == "VERIFIED"
+        assert rec["results"][-1]["status"] == "COMPLETED"
+        assert rec["results"][-1]["verification_status"] == "VERIFIED"
+        # The defect's signature must be absent from the user-visible text.
+        assert "did not execute" not in response.summary
+        assert "record_expense" not in response.summary
+
+    @pytest.mark.asyncio
+    async def test_a_failed_expense_is_still_failed(self, monkeypatch):
+        rec = self._run(monkeypatch, expense_success=False)
+
+        response = await resume_with_confirmation(
+            session_id=uuid.UUID(rec["session"]["id"]),
+            approved=True, user_id=USER, organization_id=ORG,
+        )
+
+        assert response.status == ExecutionStatus.FAILED
+        assert response.verification_status == "FAILED"
+        last = rec["results"][-1]
+        assert last["status"] == "FAILED"
+        assert last["verification_status"] == "FAILED"
+        # A failed expense is operation-level (never a "recovered" detail) and
+        # the timeline names the tool that actually failed.
+        assert last["result_data"]["failed_operations"] == [
+            {"tool": "create_expense", "error": "account not found"}
+        ]
+        assert last["result_data"]["succeeded_operations"] == ["search_account"]
 

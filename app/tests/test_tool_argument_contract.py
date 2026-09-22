@@ -319,8 +319,17 @@ def _proposal_outcome(arguments: Dict[str, Any]):
 
 
 class TestReasoningGateIntegration:
-    def test_unbindable_arguments_are_rejected_by_the_gate(self):
-        """The incident's proposal is refused while the model can still fix it."""
+    def test_the_incident_payload_is_still_refused(self):
+        """The incident's exact arguments are STILL refused by the gate.
+
+        What changed deliberately (PR-C): ``customer_name`` / ``line_items`` are
+        now DECLARED reference inputs — a model cannot supply the id of a record
+        that does not exist yet and inventing one is forbidden, so the resolver
+        (app/plan_materialization.py) converts them into canonical ids before
+        execution.  ``tax_category`` is neither a parameter nor a reference: it
+        is an invented TAX CLASSIFICATION the tool cannot consume, so the payload
+        is still rejected, with the valid parameter list fed back to the model.
+        """
         from app.accounting_reasoning import validate_outcome
 
         violations = validate_outcome(
@@ -329,7 +338,31 @@ class TestReasoningGateIntegration:
             tool_contracts=_contracts(),
         )
 
-        assert any("'line_items'" in v for v in violations)
+        assert violations, "the incident's payload must not sail through the gate"
+        message = " ".join(violations)
+        assert "'tax_category'" in message
+        assert "items" in message  # the valid parameter list is shown
+
+    def test_the_resolvable_reference_shape_passes_the_gate(self):
+        """The shape a model CAN express for a not-yet-existing record."""
+        from app.accounting_reasoning import validate_outcome
+
+        args = {
+            "customer_name": "FDS Labs Pvt",
+            "invoice_date": "2026-09-22",
+            "line_items": [
+                {"description": "Desks", "quantity": 3, "unit_price": 20000}
+            ],
+        }
+
+        assert validate_outcome(
+            _proposal_outcome(args),
+            offered_tools=("create_invoice",),
+            tool_contracts=_contracts(),
+        ) == []
+        # The substitution itself (alias -> canonical id, and the guarantee that
+        # no alias survives into the executed call) is pinned by
+        # app/tests/test_plan_materialization.py.
 
     def test_bindable_plan_passes_the_gate(self):
         from app.accounting_reasoning import validate_outcome

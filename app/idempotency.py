@@ -28,7 +28,14 @@ from app.database import call_rpc
 
 log = structlog.get_logger(__name__)
 
-# Tools that write financial state.  Read-only tools never claim a key.
+# The EXACTLY-ONCE CLAIM set (app/tool_router.py): a call to one of these
+# slugs claims a key before it runs, so a retry replays instead of writing
+# twice.  Read-only tools never claim.
+#
+# NOTE — this set carries TOOL SLUGS.  For the wider question "which TOOLS
+# write the books?" use FINANCIAL_WRITE_TOOLS below: an INTENT is not a tool
+# slug, and conflating the two made a predicate answer the wrong question
+# (see INTENT_ONLY_NAMES).
 FINANCIAL_MUTATION_TOOLS = frozenset({
     "create_invoice",
     "create_credit_note",
@@ -50,6 +57,49 @@ FINANCIAL_MUTATION_TOOLS = frozenset({
     "dispose_fixed_asset",
     "record_asset_depreciation",
 })
+
+# ---------------------------------------------------------------------------
+# Intent vocabulary vs tool vocabulary — never conflated
+# ---------------------------------------------------------------------------
+# An INTENT (app/planner.py) is what the USER asked for; a TOOL SLUG
+# (app/tools/__init__.py) is the callable that performs it.  They are usually
+# spelled the same, and exactly where they are not, a predicate built on one
+# vocabulary silently answers the wrong question for the other:
+#
+#   intent  record_expense          -> tool create_expense
+#   intent  record_sale             -> tool create_invoice
+#   intent  record_credit_sale      -> tool create_invoice
+#   (the mapping lives in app/tool_selector.py: _INTENT_TOOLS)
+#
+# These three names are INTENTS and no registered tool carries them, so they
+# can never appear as a tool result name.
+INTENT_ONLY_NAMES = frozenset({
+    "record_expense",
+    "record_sale",
+    "record_credit_sale",
+})
+
+# TOOL SLUGS that write the books: the predicate vocabulary for
+# "did this plan perform a financial mutation?" and "did the primary operation
+# run and succeed?" (app/agent.py).
+#
+# Derived from the claim set above, with the two vocabulary errors corrected:
+#   * the intent-only names are removed (no tool result can ever match them —
+#     `record_expense` in the claim set made every RECORDED expense look like a
+#     missing primary mutation, which PHASE 7/8 turned into FAILED);
+#   * `create_expense` is ADDED (it writes the expense AND posts its journal —
+#     it was absent, so an expense could never satisfy a financial predicate).
+#
+# This is NOT the claim set: `create_expense` deliberately stays out of
+# FINANCIAL_MUTATION_TOOLS, because a derived claim key is
+# ``session:<id>:<slug>`` — putting it in that set would make a SECOND,
+# genuinely different expense in the same run collide on the key and be refused
+# as "key reused with different parameters".  Widening exactly-once protection
+# to expenses therefore needs its own change (key discrimination), tracked
+# separately as it can suppress real records if done naively.
+FINANCIAL_WRITE_TOOLS = frozenset(
+    (FINANCIAL_MUTATION_TOOLS - INTENT_ONLY_NAMES) | {"create_expense"}
+)
 
 
 def request_hash(operation: str, arguments: Dict[str, Any]) -> str:
