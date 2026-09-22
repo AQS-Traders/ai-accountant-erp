@@ -56,7 +56,11 @@ PROTOCOL_ARGUMENTS = frozenset({"idempotency_key", "transaction_date"})
 ROUTER_ARGUMENTS = frozenset({"organization_id"})
 
 
-def contract_from_callable(fn: Callable[..., Any]) -> Dict[str, Any]:
+def contract_from_callable(
+    fn: Callable[..., Any],
+    *,
+    extra_arguments: Sequence[str] = (),
+) -> Dict[str, Any]:
     """Derive the argument contract of *fn* from its signature.
 
     ``accepted``      — every keyword the callable binds (excluding the
@@ -65,6 +69,32 @@ def contract_from_callable(fn: Callable[..., Any]) -> Dict[str, Any]:
                         cannot bind.
     ``accepts_extra`` — the callable has ``**kwargs``, so unknown names are
                         silently tolerated and must NOT be rejected.
+
+    ``extra_arguments`` — arguments the HANDLER consumes but *fn*'s signature
+    does not describe.  The tool handler is what receives the model's arguments
+    (``handler(organization_id, **arguments)``), and a handler may consume more
+    than it forwards to the service:
+
+        # app/tools/__init__.py
+        async def _create_purchase_bill(organization_id, **kw):
+            account_hint = _safe_account_hint(kw.pop("account_id", None))
+            data = await purchase_service.create_purchase_bill(org, **kw)
+            ... account_hint_id=account_hint ...   # journal debit account
+
+    ``account_id`` there is a real, engine-validated JOURNAL HINT — and the
+    deterministic purchase/expense fast paths set it themselves
+    (app/agent.py: ``params["account_id"] = str(account_hint)``).  Describing
+    only the service signature therefore rejected a call that binds perfectly
+    well: production 2026-09-22, "I purchased two Tables for 49000 today" was
+    blocked at PLAN_MATERIALIZATION with "'account_id' is not a parameter of
+    this tool", the run parked in AWAITING_CLARIFICATION, and every later
+    request was refused with "Your last request is still waiting for your
+    answer".
+
+    These names are added to ``accepted`` — never to ``required`` (the handler
+    treats them as optional; absent means "no hint").  Declaring them is
+    explicit and per-tool: this is NOT a blanket ``**kwargs`` allowance, and a
+    name that no handler consumes is still rejected.
     """
     signature = inspect.signature(fn)
     accepted: List[str] = []
@@ -81,6 +111,9 @@ def contract_from_callable(fn: Callable[..., Any]) -> Dict[str, Any]:
         accepted.append(name)
         if parameter.default is inspect.Parameter.empty:
             required.append(name)
+    for name in extra_arguments or ():
+        if name not in accepted and name not in ROUTER_ARGUMENTS:
+            accepted.append(name)
     return {
         "accepted": tuple(accepted),
         "required": tuple(required),
