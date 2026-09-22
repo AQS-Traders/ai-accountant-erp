@@ -92,34 +92,57 @@ def validate_arguments(
     tool_name: str,
     arguments: Any,
     contract: Optional[Dict[str, Any]] = None,
+    reference_inputs: Optional[Dict[str, Sequence[str]]] = None,
 ) -> List[str]:
     """Return violations for one proposed call, or ``[]`` when it is bindable.
 
     ``[]`` also means "cannot judge": an absent contract (a tool that declares
     none) is never a rejection — this layer must not invent strictness.
+
+    ``reference_inputs`` maps a canonical parameter to the DECLARED alias keys a
+    plan may use instead (``{"customer_id": ("customer_name", …)}``).  Those
+    aliases are read-only INPUTS to resolution: plan materialization turns them
+    into the canonical id before the tool ever runs
+    (see app/plan_materialization.py).  An alias therefore satisfies BOTH the
+    unknown-key check and the required check for its parameter.
+
+    Without this, the gate forbids the only shape a model can express when the
+    referenced record does not exist yet — it has no id to pass, and inventing
+    one is forbidden — so the plan could never be built (production
+    2026-09-22, session 0076d9a0: three proposals rejected, reasoning exhausted,
+    the request degraded to a preparatory plan and failed).
     """
     if not contract or not isinstance(arguments, dict):
         return []
 
     accepted = tuple(contract.get("accepted") or ())
+    ref_inputs = reference_inputs or {}
+    alias_keys = {
+        alias for aliases in ref_inputs.values() for alias in (aliases or ())
+    }
     violations: List[str] = []
 
     if not contract.get("accepts_extra"):
         unknown = sorted(
             key for key in arguments
-            if key not in accepted and key not in PROTOCOL_ARGUMENTS
+            if key not in accepted
+            and key not in PROTOCOL_ARGUMENTS
+            and key not in alias_keys
         )
         if unknown:
             valid = ", ".join(sorted(accepted))
+            aliases_shown = ", ".join(sorted(alias_keys))
+            hint = f" Declared reference inputs may also be used: {aliases_shown}." if aliases_shown else ""
             violations.append(
                 f"{tool_name}: {', '.join(repr(u) for u in unknown)} is not a "
                 f"parameter of this tool — the call would fail before anything "
-                f"ran. Valid parameters: {valid}."
+                f"ran. Valid parameters: {valid}.{hint}"
             )
 
     missing = sorted(
         name for name in (contract.get("required") or ())
         if name not in arguments
+        and not any(alias in arguments for alias in (ref_inputs.get(name) or ()))
     )
     if missing:
         violations.append(
@@ -136,10 +159,15 @@ def validate_arguments(
 def validate_calls(
     calls: Sequence[Dict[str, Any]],
     contracts: Optional[Dict[str, Dict[str, Any]]] = None,
+    reference_inputs: Optional[Dict[str, Dict[str, Sequence[str]]]] = None,
 ) -> List[str]:
-    """Validate a list of ``{"tool_name": ..., "arguments": {...}}`` entries."""
+    """Validate a list of ``{"tool_name": ..., "arguments": {...}}`` entries.
+
+    ``reference_inputs`` is keyed by tool slug (see ``validate_arguments``).
+    """
     if not contracts:
         return []
+    per_tool_inputs = reference_inputs or {}
     violations: List[str] = []
     for call in calls or ():
         if not isinstance(call, dict):
@@ -152,6 +180,7 @@ def validate_calls(
                 tool_name,
                 call.get("arguments") or {},
                 contracts.get(tool_name),
+                per_tool_inputs.get(tool_name),
             )
         )
     return violations

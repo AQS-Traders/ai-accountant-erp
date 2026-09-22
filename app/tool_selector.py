@@ -97,6 +97,18 @@ _INTENT_TOOLS: dict[str, set[str]] = {
 }
 
 
+def intent_tools(intent: str) -> Set[str]:
+    """The TRUSTED core toolset that carries *intent* out (public accessor).
+
+    An intent is not always spelled like its tool: ``record_expense`` is carried
+    out by ``create_expense``, and ``record_sale`` / ``record_credit_sale`` by
+    ``create_invoice``.  Anything asking "which TOOL performs this intent?" must
+    ask here instead of comparing the intent string with a tool slug — that
+    comparison silently matched NOTHING for those intents.
+    """
+    return set(_INTENT_TOOLS.get(intent, set()))
+
+
 def _lookups_for_intent(intent: str) -> Set[str]:
     """Lookups for the entity types the intent involves."""
     lookups: Set[str] = set()

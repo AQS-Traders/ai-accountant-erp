@@ -641,9 +641,22 @@ def validate_outcome(
         # CALL-BINDING time with no database work at all.  Python therefore
         # rejects the un-bindable call HERE — before any confirmation snapshot
         # exists — and feeds the precise message back to the model.
+        from app.plan_materialization import (
+            declared_reference_inputs as _declared_reference_inputs,
+        )
         from app.tool_contract import validate_calls as _validate_calls
 
-        violations.extend(_validate_calls(tools, tool_contracts))
+        violations.extend(
+            _validate_calls(
+                tools,
+                tool_contracts,
+                # The DECLARED alias inputs are legal here: plan materialization
+                # resolves them into canonical ids before execution.  A model
+                # cannot supply the id of a record that does not exist yet, and
+                # inventing one is forbidden — so these must pass the gate.
+                reference_inputs=_declared_reference_inputs(),
+            )
+        )
         stated = set(outcome.stated_disclosures)
         for field_name in REQUIRED_PROPOSAL_FIELDS:
             if field_name not in stated:

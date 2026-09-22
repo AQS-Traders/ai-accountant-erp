@@ -28,7 +28,7 @@ import time
 from app.auth import AuthContext
 from app.context_manager import build_context
 from app.books_evidence import render_evidence_compact
-from app.idempotency import FINANCIAL_MUTATION_TOOLS
+from app.idempotency import FINANCIAL_WRITE_TOOLS
 from app.database import (
     create_clarification,
     create_confirmation,
@@ -2820,6 +2820,58 @@ async def execute(
             and planned_tool_calls
             and not confirmation_granted
         ):
+            # ---- PLAN COMPLETENESS: fail closed BEFORE the user approves ----
+            # An approved plan that performs no financial mutation cannot deliver
+            # the operation the user asked for.  Refuse to snapshot it: ask
+            # instead, so no partial state is written and the user is never
+            # asked to approve something impossible (production 2026-09-22).
+            if _plan_performs_no_financial_mutation(
+                intent=execution_plan.intent, calls=planned_tool_calls
+            ):
+                _tools = ", ".join(tc.tool_name for tc in planned_tool_calls)
+                _missing = ", ".join(execution_plan.missing_fields or []) or (
+                    "the remaining details"
+                )
+                _question = (
+                    f"Nothing has been recorded yet. I could not build the "
+                    f"{str(execution_plan.intent).replace('_', ' ')} from the details "
+                    f"I have, so there is nothing for you to approve. The steps I "
+                    f"could prepare were: {_tools}. Please supply {_missing} — or "
+                    "rephrase the request, and I will try again."
+                )
+                try:
+                    _clarification = await create_clarification(
+                        session_id=session_id,
+                        question=_question,
+                        required_fields=(
+                            list(execution_plan.missing_fields or [])
+                            or ["missing_details"]
+                        ),
+                    )
+                    _question = _clarification.get("question", _question)
+                except Exception as exc:  # noqa: BLE001 — asking is not optional
+                    log.warning(
+                        "agent.clarification_write_failed",
+                        session_id=str(session_id),
+                        error=str(exc)[:200],
+                    )
+                await _log_step(session_id, "AWAITING_CLARIFICATION", {
+                    "source": "plan_incomplete",
+                    "intent": execution_plan.intent,
+                    "planned_tools": [tc.tool_name for tc in planned_tool_calls],
+                    "question": _question[:300],
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.AWAITING_CLARIFICATION,
+                    execution_id=session_id,
+                    question=_question,
+                    required_information=(
+                        list(execution_plan.missing_fields or [])
+                        or ["missing_details"]
+                    ),
+                    requires_user_input=True,
+                )
+
             # When the plan came from the accounting reasoning layer, the user
             # sees the MODEL's accounting disclosure (interpretation, affected
             # records, impact, what will NOT change, uncertainty and the exact
@@ -3423,9 +3475,15 @@ async def execute(
             if _primary_mutation_failed(
                 tool_results, intent=execution_plan.intent
             ):
+                # Match the intent's OWN tools (record_expense -> create_expense;
+                # record_sale/record_credit_sale -> create_invoice) — comparing
+                # the intent string with a tool-result name matched nothing for
+                # those intents and turned a RECORDED expense into "primary
+                # operation did not execute".
+                primary_tools = _intent_tool_names(execution_plan.intent)
                 primary = [
                     tr for tr in tool_results
-                    if tr.tool_name == execution_plan.intent
+                    if tr.tool_name in primary_tools
                 ]
                 if primary:
                     required_failures.extend(
@@ -3613,11 +3671,7 @@ async def execute(
                 successful_results,
                 [
                     tr for tr in tool_results
-                    if not tr.success
-                    and (
-                        tr.tool_name in FINANCIAL_MUTATION_TOOLS
-                        or tr.tool_name == execution_plan.intent
-                    )
+                    if not tr.success and tr.tool_name in FINANCIAL_WRITE_TOOLS
                 ],
                 intent=execution_plan.intent,
             )
@@ -4049,6 +4103,33 @@ async def _log_step(session_id: uuid.UUID, step_type: str, data: Dict[str, Any])
     _spawn_step_write(coro)
 
 
+def _intent_tool_names(intent: str) -> frozenset:
+    """The TOOL SLUGS that carry out *intent* as a financial mutation.
+
+    The intent names what the USER asked for; a tool result is named by the
+    callable that ran.  Those names differ for exactly the expense/sale intents:
+
+        record_expense      -> create_expense
+        record_sale         -> create_invoice
+        record_credit_sale  -> create_invoice
+
+    Comparing the intent STRING with a tool-result name therefore matched
+    nothing for those intents — and PHASE 7 (``required_failures``) and PHASE 8
+    (``verified``) both key on that comparison, so a RECORDED expense was
+    reported as "primary operation did not execute" and the run was closed
+    FAILED while the expense and its journal were in the books.  The mapping is
+    reused from app/tool_selector.py (the intent->toolset primitive) and
+    narrowed to the tools that actually write the books.
+
+    Returns the empty set for a non-financial intent — the caller must treat
+    that as "this execution is not a financial mutation" (never as a failure).
+    """
+    from app.tool_selector import intent_tools
+
+    candidates = set(intent_tools(intent)) | {str(intent or "")}
+    return frozenset(name for name in candidates if name in FINANCIAL_WRITE_TOOLS)
+
+
 def _financial_mutation_failures(tool_results: Sequence[ToolResult]) -> List[ToolResult]:
     """Failed FINANCIAL mutations (idempotency-guarded writes to the books).
 
@@ -4057,7 +4138,7 @@ def _financial_mutation_failures(tool_results: Sequence[ToolResult]) -> List[Too
     """
     return [
         tr for tr in tool_results
-        if not tr.success and tr.tool_name in FINANCIAL_MUTATION_TOOLS
+        if not tr.success and tr.tool_name in FINANCIAL_WRITE_TOOLS
     ]
 
 
@@ -4073,13 +4154,43 @@ def _primary_mutation_failed(tool_results: Sequence[ToolResult], *, intent: str)
     A successful AUXILIARY step (``create_customer``) proves nothing about the
     primary operation and can never satisfy this check.
     """
-    if not intent or intent not in FINANCIAL_MUTATION_TOOLS:
+    primary_tools = _intent_tool_names(intent)
+    if not primary_tools:
         return False
-    primary_results = [tr for tr in tool_results if tr.tool_name == intent]
+    primary_results = [tr for tr in tool_results if tr.tool_name in primary_tools]
     if not primary_results:
         # The primary mutation never executed at all.
         return True
     return any(not tr.success for tr in primary_results)
+
+
+def _plan_performs_no_financial_mutation(
+    *, intent: str, calls: Sequence[ToolCall]
+) -> bool:
+    """True when a plan about to be approved performs NO financial mutation.
+
+    The intent names the operation the USER asked for.  A plan that only prepares
+    state (creating the party, a catalog lookup) cannot deliver it: execution then
+    "succeeds" at its auxiliary steps while the primary operation never runs —
+    production 2026-09-22 (session 0076d9a0) approved
+    ``create_customer`` + ``search_product`` for "create an invoice for fds labs
+    pvt …", the customer was written, and the invoice could never be recorded.
+
+    ``_primary_mutation_failed`` catches that AFTER execution (and #9 reports it
+    honestly); this check refuses to SNAPSHOT the plan at all, so the user is
+    never asked to approve an operation that cannot happen and no partial state
+    is written.  Only a plan with NO financial mutation at all is refused — a
+    plan performing a DIFFERENT financial operation is a legitimate
+    re-interpretation (the model may correct the intent) and is judged by the
+    confirmation text the user reads, not by this gate.
+
+    Both halves use the TOOL vocabulary (``FINANCIAL_WRITE_TOOLS``): the intent
+    only decides WHETHER this execution is financial, never whether a tool
+    result matches it by name.
+    """
+    if not _intent_tool_names(intent):
+        return False
+    return not any(tc.tool_name in FINANCIAL_WRITE_TOOLS for tc in calls or ())
 
 
 def _execution_failure_summary(

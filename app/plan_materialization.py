@@ -522,6 +522,7 @@ async def prepare_plan(
                     tool_call.tool_name,
                     tool_call.arguments or {},
                     contracts.get(tool_call.tool_name),
+                    declared_reference_inputs().get(tool_call.tool_name),
                 )
             )
 
@@ -532,6 +533,28 @@ async def prepare_plan(
         deferred=deferred,
         batches=_batches(len(canonical), creation_index, deferred),
     )
+
+
+def declared_reference_inputs() -> Dict[str, Dict[str, Tuple[str, ...]]]:
+    """Canonical parameter -> the DECLARED alias keys a plan may use instead.
+
+    Consumed by the argument-contract gate (app/tool_contract.py): an alias is a
+    read-only INPUT to resolution, so it must satisfy both the unknown-key check
+    and the required check for its parameter.  Without this the gate forbids the
+    only shape a model can express when the referenced record does not exist yet
+    — it has no id to pass, and inventing one is forbidden — so the
+    creation-then-use sequence would be unplannable (production 2026-09-22).
+    """
+    declared: Dict[str, Dict[str, Tuple[str, ...]]] = {}
+    for tool_name, specs in DECLARED_REFERENCES.items():
+        entry: Dict[str, Tuple[str, ...]] = {
+            parameter: tuple(spec.aliases) for parameter, spec in specs.items()
+        }
+        line_aliases = DOCUMENT_LINE_ALIASES.get(tool_name)
+        if line_aliases:
+            entry["items"] = tuple(line_aliases)
+        declared[tool_name] = entry
+    return declared
 
 
 def captured_ids(
