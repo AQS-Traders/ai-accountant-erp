@@ -78,6 +78,30 @@ def _is_closed_period_error(message: str) -> bool:
     )
 
 
+async def _terminalise_claim(
+    op_id: Optional[uuid.UUID], exc: BaseException
+) -> None:
+    """Release a financial-mutation claim on a FAILED path.
+
+    Production incident 2026-09-20 (session 6a48a432, create_invoice): the
+    generic ``except Exception`` returned a ToolResult WITHOUT releasing the
+    claim, so ``public.financial_operations`` row
+    59777966-aef6-4672-adfd-ba86971e60ff stayed ``IN_PROGRESS`` with
+    ``error = NULL`` — a zombie claim that both hid the cause and blocked the
+    legitimate retry until the stale window expired.
+
+    The RAW exception type and message are stored, not the sanitised
+    model-facing sentence: the user-facing text is deliberately generic
+    ("An unexpected error occurred while executing this operation."), so the
+    claim is the ONLY durable place the real cause can survive. A FAILED claim
+    is reclaimable — ``claim_financial_operation`` resets it on the next
+    attempt — so recording the failure never wedges a retry.
+    """
+    if op_id is None:
+        return
+    await idem.safe_complete(op_id, error=f"{type(exc).__name__}: {exc}")
+
+
 def invalidate_tool_definition_cache() -> None:
     """Explicitly drop the cached Gemini tool definitions.
 
@@ -249,18 +273,23 @@ async def route_tool_call(
     #     response states the assumed date honestly (never a silent guess).
     date_param = None if read_only else _TXN_DATE_PARAM.get(slug)
     date_defaulted = False
-    if date_param:
-        arguments = dict(arguments)
-        supplied = arguments.get(date_param) or arguments.get("transaction_date")
-        parsed = parse_transaction_date(str(supplied)) if supplied else None
-        if parsed and parsed.ok:
-            arguments[date_param] = parsed.iso_date
-        else:
-            arguments[date_param] = date.today().isoformat()
-            date_defaulted = True
 
-    # 4. Execute
+    # 4. Execute.  The attempt is guarded from the DATE MAPPING onwards (not
+    #    only from the handler call) so that EVERY failure after the claim
+    #    lands in one of the two handlers below — the only places that can
+    #    release the claim.  Anything that escaped this block would leave the
+    #    claim IN_PROGRESS forever (production row 59777966, see
+    #    ``_terminalise_claim``).
     try:
+        if date_param:
+            arguments = dict(arguments)
+            supplied = arguments.get(date_param) or arguments.get("transaction_date")
+            parsed = parse_transaction_date(str(supplied)) if supplied else None
+            if parsed and parsed.ok:
+                arguments[date_param] = parsed.iso_date
+            else:
+                arguments[date_param] = date.today().isoformat()
+                date_defaulted = True
         result = await handler(organization_id, **arguments)
         if date_defaulted and result.success:
             if isinstance(result.data, dict):
@@ -293,6 +322,7 @@ async def route_tool_call(
         message = str(exc)
         if _is_closed_period_error(message):
             message = f"{message} Guidance: {_PERIOD_GUIDANCE}."
+        await _terminalise_claim(op_id, exc)
         return ToolResult(
             tool_name=slug,
             success=False,
@@ -301,7 +331,12 @@ async def route_tool_call(
             error_details=normalized,
         )
     except Exception as exc:
-        log.error("tool_router.unexpected_error", tool=slug, error=str(exc))
+        log.error(
+            "tool_router.unexpected_error",
+            tool=slug,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
         normalized = normalize_error(exc, operation=slug)
         # Model-facing message: for recoverable categories give the model an
         # actionable instruction (e.g. reuse an existing record); genuine
@@ -321,6 +356,7 @@ async def route_tool_call(
             model_message = (
                 f"{str(exc)} Guidance: {_PERIOD_GUIDANCE}."
             )
+        await _terminalise_claim(op_id, exc)
         return ToolResult(
             tool_name=slug,
             success=False,

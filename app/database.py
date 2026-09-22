@@ -434,11 +434,18 @@ async def create_tool_call(
     tool_input: Dict[str, Any],
     tool_output: Optional[Dict[str, Any]] = None,
     status: str = "COMPLETED",
+    error_details: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record a tool call within an execution session.
 
     ``tool_id`` is a FK to ``ai.tools`` resolved from the slug (cached);
     ``call_order`` is computed per session.
+
+    ``error_details`` carries WHY a call failed.  This column existed but no
+    caller could ever populate it, so every FAILED row in production held
+    NULL — including the create_invoice failure of 2026-09-20 (session
+    6a48a432), which is what made the incident's real cause unrecoverable
+    from the database.  A failed call now always stores its reason.
     """
     tool_id = await _resolve_tool_id(tool_name)
     if not tool_id:
@@ -450,18 +457,18 @@ async def create_tool_call(
         select="id",
         limit=1000,
     )
-    return await insert_one(
-        "ai_tool_calls",
-        data={
-            "execution_session_id": str(session_id),
-            "execution_step_id": str(step_id) if step_id else None,
-            "tool_id": tool_id,
-            "call_order": len(existing) + 1,
-            "input_payload": tool_input or {},
-            "output_payload": tool_output or {},
-            "status": status,
-        },
-    )
+    data: Dict[str, Any] = {
+        "execution_session_id": str(session_id),
+        "execution_step_id": str(step_id) if step_id else None,
+        "tool_id": tool_id,
+        "call_order": len(existing) + 1,
+        "input_payload": tool_input or {},
+        "output_payload": tool_output or {},
+        "status": status,
+    }
+    if error_details:
+        data["error_details"] = str(error_details)[:4000]
+    return await insert_one("ai_tool_calls", data=data)
 
 
 async def create_clarification(

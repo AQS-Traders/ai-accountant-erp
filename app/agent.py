@@ -1051,6 +1051,35 @@ def _mutation_executed(tool_calls: List[ToolCall]) -> bool:
             return True
     return False
 
+
+def _tool_audit_error_text(tr: Optional[ToolResult]) -> Optional[str]:
+    """Durable failure text for ``ai.tool_calls.error_details``.
+
+    The model-facing ``error`` is often a sanitised generic sentence (by
+    design — internals must not leak to the model), while ``error_details``
+    carries the normalised payload INCLUDING the raw exception message.  Both
+    are persisted, so the next failure of this kind is root-causable straight
+    from the database instead of from server logs.
+
+    The production incident of 2026-09-20 (session 6a48a432, create_invoice)
+    wrote a FAILED row with a NULL reason, so the true cause had to be
+    reconstructed by hand from the plan snapshot.  A FAILED call is now never
+    written without a reason.
+    """
+    if tr is None or tr.success:
+        return None
+    parts: List[str] = []
+    if tr.error_category:
+        parts.append(f"[{tr.error_category}]")
+    if tr.error:
+        parts.append(str(tr.error))
+    details = tr.error_details if isinstance(tr.error_details, dict) else {}
+    raw = details.get("message") or details.get("reason")
+    if raw and str(raw) not in " ".join(parts):
+        parts.append(f"raw: {str(raw)[:1000]}")
+    text = " ".join(parts).strip()
+    return text[:2000] or f"{tr.tool_name}: failed without an error message"
+
 # Statuses that can still move.  Distinct from main.py's set (which
 # deliberately EXCLUDES WAITING_FOR_USER so reattach does not re-attach a
 # parked run): here a parked run IS non-terminal and must be closed when a
@@ -3109,7 +3138,10 @@ async def execute(
                 llm_text = (llm_text + "\n\n" + breakdown).strip()
 
         # Log every tool call for the audit trail (fire-and-forget -
-        # Work Stream A3; drained by flush_step_logs before return).
+        # Work Stream A3; drained by flush_step_logs before return).  A
+        # FAILED call also records WHY it failed (error_details) — the
+        # column existed but nothing ever wrote it, which is how the
+        # create_invoice incident lost its real cause.
         for i, tc in enumerate(tool_calls):
             tr = tool_results[i] if i < len(tool_results) else None
             _spawn_step_write(
@@ -3122,6 +3154,7 @@ async def execute(
                         if tr else None
                     ),
                     status="COMPLETED" if (tr and tr.success) else "FAILED",
+                    error_details=_tool_audit_error_text(tr),
                 )
             )
 
