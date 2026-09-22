@@ -83,6 +83,27 @@ async def create_customer(
     return await insert_one("customers", data=data)
 
 
+async def set_receivable_account(
+    organization_id: uuid.UUID,
+    *,
+    customer_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> Optional[Dict[str, Any]]:
+    """Link the customer's DEDICATED receivable ledger.
+
+    Party segregation: the account is a child of the AR control account, so an
+    invoice debits the customer's own receivable instead of the shared control
+    account.  ``organization_id`` is passed as the second guard so a foreign row
+    id can never be updated (see database.update_one).
+    """
+    return await update_one(
+        "customers",
+        row_id=customer_id,
+        data={"receivable_account_id": str(account_id)},
+        organization_id=organization_id,
+    )
+
+
 async def get_customer_ledger(
     organization_id: uuid.UUID,
     *,

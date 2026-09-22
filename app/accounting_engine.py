@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 
 from app.services import accounting_service
+from app.services import party_ledger_service
 from app.repositories import account_repository as a_repo
 
 log = structlog.get_logger(__name__)
@@ -525,13 +526,27 @@ async def auto_journal(
 
     try:
         if document_type == "invoice":
-            # Resolve the RECEIVABLE account precisely — the first ASSET
-            # account is usually Cash (1000), which would debit Cash for a
-            # CREDIT sale. Live-verified defect (S5/S6 suite): JE-000041
-            # debited 1000 Cash instead of 1100 Accounts Receivable.
-            receivable = await accounting_service.resolve_account(
-                organization_id, account_name="Accounts Receivable"
-            )
+            # PARTY SEGREGATION: post to the CUSTOMER'S OWN receivable ledger
+            # when it exists - a child of the AR control account, created when
+            # the customer is added (app/services/party_ledger_service.py) - so
+            # the chart itself shows what each party owes.  The control account
+            # stays the fallback for parties that have no ledger yet.
+            #
+            # The resolution is READ-ONLY: a posting never grows the chart, and
+            # a party link pointing at a deactivated/foreign account is ignored.
+            receivable = None
+            if customer_id:
+                receivable = await party_ledger_service.resolve_customer_receivable_account(
+                    organization_id, customer_id
+                )
+            if not receivable:
+                # Resolve the RECEIVABLE account precisely — the first ASSET
+                # account is usually Cash (1000), which would debit Cash for a
+                # CREDIT sale. Live-verified defect (S5/S6 suite): JE-000041
+                # debited 1000 Cash instead of 1100 Accounts Receivable.
+                receivable = await accounting_service.resolve_account(
+                    organization_id, account_name="Accounts Receivable"
+                )
             if not receivable:
                 receivable = await _resolve_default_account(
                     organization_id, "ASSET", fallback_type="CURRENT_ASSET",
@@ -562,9 +577,25 @@ async def auto_journal(
             ) else await _resolve_default_account(
                 organization_id, "EXPENSE",
             )
-            payable = await _resolve_default_account(
-                organization_id, "LIABILITY", fallback_type="CURRENT_LIABILITY",
-            )
+            # PARTY SEGREGATION (payable side): the SUPPLIER'S OWN payable
+            # ledger when it exists; the AP control account otherwise.
+            payable = None
+            if supplier_id:
+                payable = await party_ledger_service.resolve_supplier_payable_account(
+                    organization_id, supplier_id
+                )
+            if not payable:
+                # Resolve the PAYABLE control account by NAME, not as a generic
+                # liability default: once parties hang under 2010 it becomes a
+                # HEADING, and the default resolver deliberately refuses to
+                # return a heading (a heading must never carry a posting).
+                payable = await accounting_service.resolve_account(
+                    organization_id, account_name="Accounts Payable"
+                )
+            if not payable:
+                payable = await _resolve_default_account(
+                    organization_id, "LIABILITY", fallback_type="CURRENT_LIABILITY",
+                )
             if not expense or not payable:
                 return {"journal_warning": "Cannot resolve Expense or Payable accounts"}
             entry = await record_credit_purchase(

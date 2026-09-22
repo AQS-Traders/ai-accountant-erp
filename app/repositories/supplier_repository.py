@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Dict, List, Optional
 
-from app.database import fetch_many, fetch_one, insert_one, search_ilike
+from app.database import fetch_many, fetch_one, insert_one, search_ilike, update_one
 
 
 async def search_suppliers(
@@ -80,6 +80,26 @@ async def create_supplier(
         "is_active": True,
     }
     return await insert_one("suppliers", data=data)
+
+
+async def set_payable_account(
+    organization_id: uuid.UUID,
+    *,
+    supplier_id: uuid.UUID,
+    account_id: uuid.UUID,
+) -> Optional[Dict[str, Any]]:
+    """Link the supplier's DEDICATED payable ledger.
+
+    Party segregation: the account is a child of the AP control account, so a
+    purchase bill credits the supplier's own payable instead of the shared
+    control account.  ``organization_id`` is the second guard on the update.
+    """
+    return await update_one(
+        "suppliers",
+        row_id=supplier_id,
+        data={"payable_account_id": str(account_id)},
+        organization_id=organization_id,
+    )
 
 
 async def get_supplier_ledger(
