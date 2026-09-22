@@ -26,6 +26,58 @@ async def get(
     return await repo.get_supplier(organization_id, supplier_id=supplier_id)
 
 
+async def _with_party_ledger(
+    organization_id: uuid.UUID, supplier: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Link the supplier's DEDICATED payable ledger, then return the record.
+
+    Best-effort by design: the supplier exists either way, and a purchase bill
+    falls back to the AP control account (today's behaviour) when the ledger
+    could not be provisioned.  ``ensure`` reuses an existing child account by
+    name, so calling it on the reuse path creates nothing twice.
+    """
+    from app.services import party_ledger_service
+
+    supplier = dict(supplier or {})
+    try:
+        account, created = await party_ledger_service.ensure_supplier_payable_account(
+            organization_id, supplier
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the supplier
+        log.warning(
+            "supplier.party_ledger_failed",
+            name=supplier.get("name"),
+            error=str(exc)[:200],
+        )
+        return supplier
+    if not account or not account.get("id"):
+        return supplier
+
+    account_id = str(account["id"])
+    linked = str(supplier.get("payable_account_id") or "")
+    if linked != account_id:
+        try:
+            await repo.set_payable_account(
+                organization_id,
+                supplier_id=uuid.UUID(str(supplier["id"])),
+                account_id=uuid.UUID(account_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - the account exists; the link can retry
+            log.warning(
+                "supplier.party_ledger_link_failed",
+                name=supplier.get("name"),
+                account_code=account.get("code"),
+                error=str(exc)[:200],
+            )
+    return {
+        **supplier,
+        "payable_account_id": account_id,
+        "payable_account_code": account.get("code"),
+        "payable_account_name": account.get("name"),
+        "payable_account_created": created,
+    }
+
+
 async def create(
     organization_id: uuid.UUID,
     *,
@@ -52,9 +104,11 @@ async def create(
             # Explicit reuse marker: the agent's narrative MUST reflect
             # reuse (never "newly created") — the tool result is the
             # authoritative record of what happened.
-            return {**s, "reused": True}
+            return await _with_party_ledger(
+                organization_id, {**s, "reused": True}
+            )
 
-    return await repo.create_supplier(
+    created = await repo.create_supplier(
         organization_id=organization_id,
         name=name,
         email=email,
@@ -67,6 +121,7 @@ async def create(
         payable_account_id=payable_account_id,
         notes=notes,
     )
+    return await _with_party_ledger(organization_id, created)
 
 
 async def get_ledger(

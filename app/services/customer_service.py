@@ -26,6 +26,60 @@ async def get(
     return await repo.get_customer(organization_id, customer_id=customer_id)
 
 
+async def _with_party_ledger(
+    organization_id: uuid.UUID, customer: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Link the customer's DEDICATED receivable ledger, then return the record.
+
+    Best-effort by design: the customer exists either way, and a posting falls
+    back to the AR control account (today's behaviour) when the ledger could not
+    be provisioned - a bookkeeping failure must never lose the party.  On the
+    reuse path a customer created before this feature still gets its ledger,
+    once: ``ensure`` reuses an existing child account by name, so a second call
+    creates nothing.
+    """
+    from app.services import party_ledger_service
+
+    customer = dict(customer or {})
+    try:
+        account, created = await party_ledger_service.ensure_customer_receivable_account(
+            organization_id, customer
+        )
+    except Exception as exc:  # noqa: BLE001 - never lose the customer
+        log.warning(
+            "customer.party_ledger_failed",
+            name=customer.get("name"),
+            error=str(exc)[:200],
+        )
+        return customer
+    if not account or not account.get("id"):
+        return customer
+
+    account_id = str(account["id"])
+    linked = str(customer.get("receivable_account_id") or "")
+    if linked != account_id:
+        try:
+            await repo.set_receivable_account(
+                organization_id,
+                customer_id=uuid.UUID(str(customer["id"])),
+                account_id=uuid.UUID(account_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - the account exists; the link can retry
+            log.warning(
+                "customer.party_ledger_link_failed",
+                name=customer.get("name"),
+                account_code=account.get("code"),
+                error=str(exc)[:200],
+            )
+    return {
+        **customer,
+        "receivable_account_id": account_id,
+        "receivable_account_code": account.get("code"),
+        "receivable_account_name": account.get("name"),
+        "receivable_account_created": created,
+    }
+
+
 async def create(
     organization_id: uuid.UUID,
     *,
@@ -53,9 +107,11 @@ async def create(
             # Return the existing customer instead of creating a duplicate.
             # Explicit reuse marker: the agent's narrative MUST reflect
             # reuse (never "newly created").
-            return {**c, "reused": True}
+            return await _with_party_ledger(
+                organization_id, {**c, "reused": True}
+            )
 
-    return await repo.create_customer(
+    created = await repo.create_customer(
         organization_id=organization_id,
         name=name,
         email=email,
@@ -68,6 +124,7 @@ async def create(
         receivable_account_id=receivable_account_id,
         notes=notes,
     )
+    return await _with_party_ledger(organization_id, created)
 
 
 async def get_ledger(
