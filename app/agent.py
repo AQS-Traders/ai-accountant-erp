@@ -3094,11 +3094,24 @@ async def execute(
             if materialization.blocked:
                 # STOP — ask, never guess.  Nothing has been executed.
                 reason = " ".join(materialization.blocks)[:1500]
-                clarification = await create_clarification(
-                    session_id=session_id,
-                    question=reason,
-                    required_fields=["resolution"],
-                )
+                question = reason
+                try:
+                    clarification = await create_clarification(
+                        session_id=session_id,
+                        question=reason,
+                        required_fields=["resolution"],
+                    )
+                    question = clarification.get("question", reason)
+                except Exception as exc:  # noqa: BLE001 — asking is not optional
+                    # The question IS the contract with the user; a bookkeeping
+                    # write must never turn "which record did you mean?" into a
+                    # generic system failure (that is how a resolvable stop
+                    # becomes an unexplained crash).
+                    log.warning(
+                        "agent.clarification_write_failed",
+                        session_id=str(session_id),
+                        error=str(exc)[:200],
+                    )
                 await _log_step(session_id, "AWAITING_CLARIFICATION", {
                     "source": "plan_materialization",
                     "question": reason[:300],
@@ -3106,7 +3119,7 @@ async def execute(
                 return AgentResponse(
                     status=ExecutionStatus.AWAITING_CLARIFICATION,
                     execution_id=session_id,
-                    question=clarification.get("question", reason),
+                    question=question,
                     required_information=["resolution"],
                     requires_user_input=True,
                 )
