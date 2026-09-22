@@ -3064,12 +3064,94 @@ async def execute(
                 "intent": execution_plan.intent,
                 "tools_planned": len(planned_tool_calls),
             })
-            executed = await execute_planned_tool_calls(
-                planned_tool_calls, _executor
+            # ---- PLAN MATERIALIZATION (approved plans only) ----------------
+            # An approved plan is expressed in the user's own terms
+            # (`customer_name`, `product_name`); the tools need canonical ids.
+            # Python resolves those references against the LIVE, tenant-scoped
+            # books and BLOCKS with an explicit question when it cannot: it
+            # never invents an id, never picks between ambiguous records, and
+            # never creates anything the user did not approve.  The approved
+            # snapshot in ai.confirmations.plan is left untouched — the mapping
+            # is recorded durably in the step below.
+            from app.plan_materialization import (
+                bind_deferred as _bind_deferred,
+                captured_ids as _captured_ids,
+                prepare_plan as _prepare_plan,
+                step_payload as _materialization_payload,
             )
+            from app.tools import tool_contracts as _tool_argument_contracts
+
+            materialization = await _prepare_plan(
+                organization_id=organization_id,
+                calls=planned_tool_calls,
+                contracts=_tool_argument_contracts(),
+            )
+            await _log_step(
+                session_id,
+                "PLAN_MATERIALIZATION",
+                _materialization_payload(materialization, original=planned_tool_calls),
+            )
+            if materialization.blocked:
+                # STOP — ask, never guess.  Nothing has been executed.
+                reason = " ".join(materialization.blocks)[:1500]
+                clarification = await create_clarification(
+                    session_id=session_id,
+                    question=reason,
+                    required_fields=["resolution"],
+                )
+                await _log_step(session_id, "AWAITING_CLARIFICATION", {
+                    "source": "plan_materialization",
+                    "question": reason[:300],
+                })
+                return AgentResponse(
+                    status=ExecutionStatus.AWAITING_CLARIFICATION,
+                    execution_id=session_id,
+                    question=clarification.get("question", reason),
+                    required_information=["resolution"],
+                    requires_user_input=True,
+                )
+
+            # Execute in dependency order: a call whose id comes from an
+            # approved prerequisite step runs only AFTER that step produced the
+            # id (captured from the real record — never invented).
+            executed: List[Dict[str, Any]] = []
+            provided_ids: Dict[str, str] = {}
+            binding_problems: List[str] = []
+            for batch in materialization.batches:
+                batch_calls: List[ToolCall] = []
+                for position in batch:
+                    call = materialization.calls[position]
+                    specs = materialization.deferred.get(position)
+                    if specs:
+                        call, issues = _bind_deferred(
+                            call=call,
+                            specs=specs,
+                            provided_ids=provided_ids,
+                            index=position,
+                            decisions=materialization.decisions,
+                        )
+                        binding_problems.extend(issues)
+                        if not issues:
+                            # keep the canonical record equal to what runs
+                            materialization.calls[position] = call
+                    batch_calls.append(call)
+                batch_results = await execute_planned_tool_calls(batch_calls, _executor)
+                provided_ids.update(
+                    _captured_ids(calls=batch_calls, results=batch_results)
+                )
+                executed.extend(batch_results)
+            if binding_problems:
+                # A prerequisite did not produce a record: the dependent call was
+                # skipped rather than filled with an invented id.
+                await _log_step(session_id, "FAILED", {
+                    "reason": "prerequisite_missing",
+                    "stage": "materialization",
+                    "detail": " ".join(binding_problems)[:1000],
+                    "controlled": True,
+                })
             final_result = {
                 "text": "",
-                "tool_calls": planned_tool_calls,
+                "tool_calls": materialization.calls,
                 "tool_results": [
                     ToolResult(
                         tool_name=tc.tool_name,
@@ -3077,7 +3159,7 @@ async def execute(
                         data=data,
                         error=data.get("error"),
                     )
-                    for tc, data in zip(planned_tool_calls, executed)
+                    for tc, data in zip(materialization.calls, executed)
                 ],
             }
         else:
