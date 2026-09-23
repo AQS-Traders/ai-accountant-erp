@@ -332,7 +332,7 @@ class Settings(BaseSettings):
     # boundaries are NOT where the marketing names suggest: a small instruct
     # model answers a mechanical extraction FASTER than a "plus" model, while
     # the classic flagship answers the hardest accounting question as fast as
-    # anything else. Full table: docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md.
+    # anything else.
     #
     #   tier          | measured winner                        | use
     #   fast          | qwen3-30b-a3b-instruct-2507   3.5-10s | extraction,

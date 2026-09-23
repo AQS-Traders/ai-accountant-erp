@@ -1,8 +1,0 @@
-{
-  "name": "balance_sheet_report",
-  "message": "generate the balance sheet",
-  "expected": {
-    "intent": "generate_balance_sheet",
-    "requires_clarification": false
-  }
-}

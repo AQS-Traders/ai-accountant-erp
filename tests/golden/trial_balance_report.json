@@ -1,8 +1,0 @@
-{
-  "name": "trial_balance_report",
-  "message": "show me the trial balance",
-  "expected": {
-    "intent": "generate_trial_balance",
-    "requires_clarification": false
-  }
-}

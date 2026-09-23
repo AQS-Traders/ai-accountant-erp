@@ -102,8 +102,7 @@ async def get_journal_lines(
     DEFENCE IN DEPTH: ``journal_lines`` carries ``organization_id``, so pass it
     to add a second filter.  The entry id is normally already org-verified by
     :func:`get_journal_entry`, but without this a foreign entry id would return
-    another tenant's lines.  This unscoped read was flagged as a latent hole in
-    the repository's own audit (docs/CODEBASE_INTEGRATION_AUDIT.md).
+    another tenant's lines.
     """
     filters: Dict[str, Any] = {"entry_id": str(entry_id)}
     if organization_id is not None:

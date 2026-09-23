@@ -67,16 +67,15 @@ def _clock_skew_message(token: str) -> str:
             return (
                 "Your computer clock is behind real time by about "
                 f"{minutes} minute(s), so this freshly issued token looks "
-                "'not yet valid'. Sync the Windows clock (run fix_clock.bat, "
-                "or Settings > Time & language > Date & time > Sync now) "
-                "and try again."
+                "'not yet valid'. Sync your system clock (Windows: Settings "
+                "> Time & language > Date & time > Sync now; macOS/Linux: "
+                "enable network time) and try again."
             )
     except Exception:  # noqa: BLE001 - message building must never fail
         pass
     return (
         "Your computer clock is behind real time, so this freshly issued "
-        "token looks 'not yet valid'. Sync the Windows clock (run "
-        "fix_clock.bat) and try again."
+        "token looks 'not yet valid'. Sync your system clock and try again."
     )
 
 # Cached JWKS client (one per process).

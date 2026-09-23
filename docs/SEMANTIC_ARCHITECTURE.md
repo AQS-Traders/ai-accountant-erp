@@ -1,4 +1,4 @@
-# Semantic Architecture (Work Stream S2 — AI-Native ERP)
+# Semantic Architecture
 
 ## Objective
 

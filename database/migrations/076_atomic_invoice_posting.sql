@@ -10,8 +10,7 @@
 --   app/tools/__init__.py
 --       auto_journal(...)                 -> INSERT journal_entries + lines
 --
--- The repository's own audit says the same
--- (docs/CODEBASE_INTEGRATION_AUDIT.md): "invoice -> items -> journal are
+-- The problem is structural: "invoice -> items -> journal are
 -- separate writes ... partial states possible".  A failure between them
 -- leaves a DOCUMENT WITHOUT LINES, or an invoice whose journal never existed,
 -- with no way to tell afterwards.

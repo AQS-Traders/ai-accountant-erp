@@ -1,16 +1,14 @@
-"""Operator recipe - give every existing party its dedicated receivable/payable ledger.
+"""Operator utility - give every existing party its dedicated receivable/payable ledger.
+
+Every customer gets a receivable account and every supplier a payable account as
+a child of the corresponding control account, so the chart shows what each party
+owes or is owed instead of merging all parties into one control balance.  New
+parties are provisioned automatically on creation; this utility backfills the
+parties that existed before that behaviour.
 
 DRY RUN BY DEFAULT.  With no ``--apply`` flag it prints exactly which accounts
 it WOULD create (party, code, control account) and writes nothing.  ``--apply``
 creates the missing accounts and links them on the party rows.
-
-Why this exists
----------------
-Invoices debited the shared ``1100 Accounts Receivable`` control account, so the
-chart could not show what each party owes (live: two posted invoices, both at
-1100).  New parties now get their own child ledger automatically
-(app/services/party_ledger_service.py, wired into customer/supplier creation);
-parties created BEFORE that change need this one-off backfill.
 
 What it does NOT do
 -------------------

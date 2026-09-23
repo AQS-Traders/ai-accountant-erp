@@ -36,8 +36,6 @@ What Python does here (enforcement, never interpretation):
   asset exists, or which workflow applies.  The caller (agent) additionally
   enforces the trusted tool registry, permissions and the confirmation gate
   before anything executes.
-
-Architecture: docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md
 """
 
 from __future__ import annotations

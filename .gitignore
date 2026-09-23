@@ -11,7 +11,7 @@
 # A token pasted into a file by hand, e.g. `github.txt` (Windows Explorer
 # "New text document" produces `github.txt.txt`).  These were previously NOT
 # ignored, so a routine `git add .` would have committed a live PAT.
-# `*token*.txt` also covers the Vercel_Token.txt described in the runbook.
+# `*token*.txt` also covers hand-saved provider tokens.
 github.txt
 github.txt.txt
 *token*.txt
@@ -67,14 +67,9 @@ r4_*.txt
 reg2_*.txt
 reg3_*.txt
 reasoning_*.txt
-# Session verification outputs (Work Stream K2)
-pytest_*.txt
+# Local verification output
 build*.txt
 tsc*.txt
-vitest*.txt
-eval_*.txt
-suite_check*.txt
-probe.txt
 scripts/test_invoice.png
 
 # ---- OS / IDE ----
@@ -86,14 +81,7 @@ desktop.ini
 # ---- Any local log files ----
 *.log
 
-# ---- Tests ----
-# The backend suite and its golden fixtures ARE tracked.  They are the only
-# regression protection this project has, and CI
-# (.github/workflows/ci.yml) runs them on every push.  They were previously
-# excluded "per project policy", which meant 700+ tests never ran anywhere
-# except a developer's machine — and shipped regressions were undetectable.
-# Live harnesses remain ignored: they need real credentials and a live
-# database, so they are not runnable in CI.
+# ---- Local scratch ----
 scripts/test_*.py
 scripts/smoke_test.py
 .env.local

@@ -28,8 +28,6 @@ which party is required, whether an asset exists, or which workflow to run.
 It returns what the books actually contain, labelled for the model as::
 
     LIVE BOOKS EVIDENCE — use this to reassess the request
-
-Architecture: docs/LLM_PRIMARY_REASONING_ARCHITECTURE.md
 """
 
 from __future__ import annotations

@@ -29,8 +29,7 @@
 --      Revoking does not change any authenticated flow: EXECUTE is granted
 --      back to `authenticated` explicitly.
 --
---   NOT addressed here (deliberate, documented in
---   docs/SECURITY_HARDENING_REVIEW.md):
+--   NOT addressed here (deliberate):
 --      * ai.worker_jobs has RLS enabled with no policies — service-role-only
 --        table by design; the backend reaches it with the service key, which
 --        bypasses RLS entirely.

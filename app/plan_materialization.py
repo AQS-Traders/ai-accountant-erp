@@ -16,8 +16,8 @@ human-level reference into the canonical id the tool requires.
 
 This module performs that transformation, and nothing else.
 
-INVARIANTS (each one is pinned by app/tests/test_plan_materialization.py)
-------------------------------------------------------------------------
+INVARIANTS
+----------
 * READ-ONLY: resolution never writes.  It only calls the tenant-scoped,
   permission-checked ``search_*`` services that already exist.
 * DECLARED references only: a parameter is touched only when the tool declares
