@@ -85,8 +85,13 @@ export default function CataloguePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [rowBusy, setRowBusy] = useState<string | null>(null);
 
+  // The polling interval must not restart on every keystroke, so `load` reads
+  // the latest term from a ref.  The ref is synced in an EFFECT: writing it
+  // during render is forbidden (react-hooks/refs) and can drop updates.
   const searchRef = useRef(search);
-  searchRef.current = search;
+  useEffect(() => {
+    searchRef.current = search;
+  }, [search]);
 
   const load = useCallback(
     async (opts: { silent?: boolean } = {}) => {
@@ -341,9 +346,6 @@ export default function CataloguePage() {
           ))}
         </div>
       </div>
-
-  const noun = kind === "products" ? "product" : "service";
-
 
       {/* ---- table ------------------------------------------------------- */}
       {error && <ErrorState message={error} />}
